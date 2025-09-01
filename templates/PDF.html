@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 论文元数据提取器 - 控制面板</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        /* ========== 全局与卡片风格 ========== */
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            color: #111827;
+        }
+        .bento-box {
+            background-color: rgba(255, 255, 255, 0.6);
+            backdrop-filter: blur(4px);
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            box-shadow: 0 6px 18px -10px rgba(17, 24, 39, 0.25);
+            padding: 1.25rem;
+            transition: box-shadow .25s ease, transform .25s ease, border-color .25s ease;
+        }
+        .bento-box:hover {
+            box-shadow: 0 12px 28px -14px rgba(17, 24, 39, 0.32);
+            border-color: #e2e8f0;
+        }
+
+        .log-container::-webkit-scrollbar,
+        .table-container::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .log-container::-webkit-scrollbar-track,
+        .table-container::-webkit-scrollbar-track {
+            background: #f1f5f9;
+            border-radius: 999px;
+        }
+        .log-container::-webkit-scrollbar-thumb,
+        .table-container::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 999px;
+        }
+        .log-container::-webkit-scrollbar-thumb:hover,
+        .table-container::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* ========== 表格整体布局优化 ========== */
+        .table-container {
+            border-radius: 12px;
+            border: 1px solid #e5e7eb;
+            background: white;
+            box-shadow: inset 0 1px 0 rgba(0,0,0,0.02);
+            overflow: auto;
+            max-height: 70vh;
+        }
+
+        .results-table {
+            table-layout: fixed; /* 固定布局，避免列抖动 */
+            width: 100%;
+            border-collapse: separate;      /* 使用分离边框提升清晰度 */
+            border-spacing: 0;              /* 取消默认间距 */
+            font-size: 0.95rem;             /* 微调字号 */
+        }
+
+        /* 表头：粘性 + 层级感 + 视觉分隔 */
+        .results-table thead th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: linear-gradient(180deg,#f8fafc 0%,#f1f5f9 100%); /* 淡渐变更易读 */
+            font-weight: 600;
+            color: #334155;
+            letter-spacing: .02em;
+            text-transform: uppercase;
+            border-bottom: 2px solid #e5e7eb;
+            padding: 10px 14px;
+            white-space: nowrap;
+        }
+
+        /* 单元格基础样式：更舒展的行高与内边距 */
+        .results-table td {
+            padding: 10px 14px;
+            vertical-align: top;
+            line-height: 1.55;
+            color: #0f172a;
+            word-wrap: break-word;
+            word-break: break-word;
+            white-space: normal;
+            border-bottom: 1px solid #f1f5f9;
+            max-width: 0; /* 配合table-layout: fixed */
+        }
+
+        /* 斑马纹与悬停高亮（仅样式，不改变功能） */
+        .results-table tbody tr:nth-child(odd) td {
+            background-color: #fcfcfe;
+        }
+        .results-table tbody tr:hover td {
+            background-color: #f6f8fb;
+        }
+
+        /* 首尾圆角（滚动容器内更精致） */
+        .results-table thead th:first-child { border-top-left-radius: 12px; }
+        .results-table thead th:last-child  { border-top-right-radius: 12px; }
+        .results-table tbody tr:last-child td:first-child { border-bottom-left-radius: 12px; }
+        .results-table tbody tr:last-child td:last-child  { border-bottom-right-radius: 12px; }
+
+        /* ========== 列宽策略（更合理的比例） ========== */
+        .col-filename { width: 14%; }
+        .col-title { width: 26%; }
+        .col-author { width: 16%; }
+        .col-affiliation { width: 18%; }
+        .col-email { width: 14%; }
+        .col-keywords { width: 18%; }
+        .col-abstract { width: 28%; }
+        .col-acknowledgment { width: 28%; }
+        .col-order { width: 14%; }
+
+        /* 长文本：更友好的滚动与渐隐边缘，不遮挡文字 */
+        .long-text {
+            max-height: 140px;
+            overflow-y: auto;
+            padding-right: 8px;
+            position: relative;
+            mask-image: linear-gradient(180deg, rgba(0,0,0,1) 80%, rgba(0,0,0,0.55) 95%, rgba(0,0,0,0) 100%);
+        }
+
+        /* 长文本滚动条微调（与容器一致） */
+        .long-text::-webkit-scrollbar {
+            width: 6px;
+        }
+        .long-text::-webkit-scrollbar-track {
+            background: #f1f5f9;
+            border-radius: 6px;
+        }
+        .long-text::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 6px;
+        }
+        .long-text::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* 头/尾隐藏的柔和阴影，暗示可滚动（纯样式，不是按钮） */
+        .long-text::before,
+        .long-text::after {
+            content: "";
+            position: sticky;
+            left: 0;
+            right: 0;
+            height: 16px;
+            display: block;
+            pointer-events: none;
+            z-index: 1;
+        }
+        .long-text::before {
+            top: 0;
+            background: linear-gradient(180deg, rgba(248,250,252,1), rgba(248,250,252,0));
+        }
+        .long-text::after {
+            bottom: 0;
+            background: linear-gradient(0deg, rgba(248,250,252,1), rgba(248,250,252,0));
+        }
+
+        /* 表头细节：小型字体在小屏更紧凑 */
+        @media (max-width: 768px) {
+            .results-table { font-size: 0.9rem; }
+            .results-table thead th { padding: 9px 10px; }
+            .results-table td { padding: 9px 10px; }
+        }
+
+        /* --- 原有按钮风格（未改动功能） --- */
+        .btn-primary {
+            background-color: #E31937;
+            color: white;
+            font-weight: bold;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            transition: all 0.3s ease-in-out;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-primary:hover {
+            background-color: #c0122c;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transform: translateY(-0.125rem);
+        }
+        .btn-primary:disabled {
+            background-color: #d1d5db;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: translateY(0);
+        }
+        .btn-secondary {
+            background-color: #4b5563;
+            color: white;
+            font-weight: bold;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            transition: all 0.3s ease-in-out;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-secondary:hover {
+            background-color: #374151;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transform: translateY(-0.125rem);
+        }
+        .btn-secondary:disabled {
+            background-color: #d1d5db;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-7xl mx-auto">
+        <main class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- 左侧控制面板 -->
+            <div class="bento-box md:col-span-1 flex flex-col gap-6">
+                <div class="flex items-center gap-3">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E31937" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-settings"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    <h2 class="text-2xl font-bold text-gray-800">控制面板</h2>
+                </div>
+                <div>
+                    <label for="extractionMode" class="text-sm font-medium text-gray-600 mb-1 block">1. 选择提取模式</label>
+                    <select id="extractionMode" class="w-full p-3 border border-gray-300 rounded-lg bg-white text-gray-700 focus:ring-2 focus:ring-[#E31937] focus:border-[#E31937] transition-colors">
+                        <option value="sn">SN信息表收集</option>
+                        <option value="ieee">IEEE信息表收集</option>
+                        <option value="funding">资助信息提取</option>
+                        <option value="ap">AP信息表收集</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="pdfFiles" class="text-sm font-medium text-gray-600 mb-1 block">2. 选择 PDF 文件</label>
+                    <input type="file" id="pdfFiles" multiple accept=".pdf" class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-[#E31937]/10 file:text-[#E31937] hover:file:bg-[#E31937]/20 cursor-pointer">
+                </div>
+                <div class="mt-auto pt-6 border-t border-gray-200">
+                    <label class="text-sm font-medium text-gray-600 mb-1 block">3. 开始处理</label>
+                    <button id="startButton" class="btn-primary w-full">开始处理</button>
+                    <div id="downloadLinkContainer" class="mt-3"></div>
+                </div>
+            </div>
+
+            <!-- 右侧状态和日志 -->
+            <div class="bento-box md:col-span-2 flex flex-col">
+                 <div class="flex items-center gap-3 mb-4">
+                     <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#E31937" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-activity"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                    <h2 class="text-2xl font-bold text-gray-800">状态 & 日志</h2>
+                </div>
+                <div id="status" class="text-center font-medium text-gray-700 bg-gray-100 p-4 rounded-lg mb-4">
+                    请选择文件并开始
+                </div>
+                <div id="logContainer" class="log-container flex-grow bg-gray-900 text-white font-mono text-sm p-4 rounded-lg overflow-y-auto h-96">
+                    <p class="text-gray-400">&gt; 等待任务开始...</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- 结果预览区（结构不变，仅样式更好看） -->
+        <div id="resultsContainer" class="hidden mt-6">
+            <div class="bento-box">
+                <div class="flex items-center gap-3 mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#E31937" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-grid"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                    <h2 class="text-2xl font-bold text-gray-800">处理结果预览</h2>
+                </div>
+                <div class="table-container overflow-x-auto">
+                    <table id="resultsTable" class="results-table">
+                        <thead>
+                            <!-- 表头将由JS动态生成 -->
+                        </thead>
+                        <tbody>
+                            <!-- 表格数据将由JS动态生成 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- 引入 SheetJS 用于生成 Excel ---
+    const sheetJsScript = document.createElement('script');
+    sheetJsScript.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    document.head.appendChild(sheetJsScript);
+
+    // --- 后端服务地址（内置） ---
+    const BACKEND_URL = '';
+
+    // --- DOM 元素获取 ---
+    const extractionModeSelect = document.getElementById('extractionMode');
+    const pdfFilesInput = document.getElementById('pdfFiles');
+    const startButton = document.getElementById('startButton');
+    const downloadLinkContainer = document.getElementById('downloadLinkContainer');
+    const statusDiv = document.getElementById('status');
+    const logContainer = document.getElementById('logContainer');
+    const resultsContainer = document.getElementById('resultsContainer');
+    const resultsTable = document.getElementById('resultsTable');
+
+    let processedDataForExcel = [];
+
+    // --- 日志函数 ---
+    function logMessage(message, type = 'info') {
+        const p = document.createElement('p');
+        let prefix = '&gt;';
+        if (type === 'success') {
+            p.className = 'text-green-400';
+            prefix = '✅';
+        } else if (type === 'error') {
+            p.className = 'text-red-400';
+            prefix = '❌';
+        } else {
+            p.className = 'text-gray-300';
+        }
+        p.innerHTML = `${prefix} ${message.replace(/</g, "&lt;").replace(/>/g, "&gt;")}`; // Basic sanitization
+        logContainer.appendChild(p);
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+    
+    // --- 定义列排序函数 (支持两种模式) ---
+    function getSortedHeaders(data, mode = 'sn') {
+        const headerSet = new Set();
+        data.forEach(row => {
+            if (typeof row === 'object' && row !== null) {
+                Object.keys(row).forEach(key => headerSet.add(key));
+            }
+        });
+
+        const getHeaderRank = (header) => {
+            if (mode === 'funding') {
+                // 资助信息模式的列顺序
+                const fundingOrder = ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位', '通讯作者邮箱', '关键词', '摘要', '致谢'];
+                const index = fundingOrder.indexOf(header);
+                if (index !== -1) return index;
+            } else if (mode === 'ieee') {
+                // IEEE模式的列顺序：订单号、英文题目、英文副标、作者姓名、第一作者邮箱
+                const ieeeOrder = ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'];
+                const index = ieeeOrder.indexOf(header);
+                if (index !== -1) return index;
+            } else if (mode === 'ap') {
+                // AP模式的列顺序：文件名、题目、关键词、摘要、第一作者姓、第一作者名、通讯作者姓、通讯作者名
+                const apOrder = ['文件名', '题目', '关键词', '摘要', '第一作者姓', '第一作者名', '通讯作者姓', '通讯作者名'];
+                const index = apOrder.indexOf(header);
+                if (index !== -1) return index;
+            } else {
+                // SN模式的列顺序
+                const snOrder = ['Number', 'Title', 'SubTitle', 'Corresponding Author', "Corresponding author's email"];
+                const index = snOrder.indexOf(header);
+                if (index !== -1) return index;
+
+                const authorMatch = header.match(/^Author (\d+)$/);
+                if (authorMatch) return 100 + (parseInt(authorMatch[1], 10) * 2);
+
+                const affilMatch = header.match(/^Affiliation (\d+)$/);
+                if (affilMatch) return 100 + (parseInt(affilMatch[1], 10) * 2) + 1;
+            }
+
+            return 999; // 其他未知列排在最后
+        };
+
+        return [...headerSet].sort((a, b) => getHeaderRank(a) - getHeaderRank(b));
+    }
+
+    // --- 获取保持原始顺序的表头 ---
+    function getOriginalOrderHeaders(data, mode = 'sn') {
+        if (!data || data.length === 0) return [];
+
+        // 使用第一个有效数据对象的键顺序作为基准
+        const firstValidRow = data.find(row => typeof row === 'object' && row !== null);
+        if (!firstValidRow) return [];
+
+        // 获取第一行的键顺序
+        const firstRowHeaders = Object.keys(firstValidRow);
+
+        // 收集所有可能的表头
+        const allHeadersSet = new Set();
+        data.forEach(row => {
+            if (typeof row === 'object' && row !== null) {
+                Object.keys(row).forEach(key => allHeadersSet.add(key));
+            }
+        });
+
+        // 保持第一行的顺序，然后添加其他列
+        const orderedHeaders = [...firstRowHeaders];
+        const remainingHeaders = [...allHeadersSet].filter(header => !firstRowHeaders.includes(header));
+
+        return [...orderedHeaders, ...remainingHeaders];
+    }
+
+    // --- 获取列的CSS类 ---
+    function getColumnClass(header) {
+        const headerLower = header.toLowerCase();
+
+        if (headerLower.includes('文件名') || headerLower.includes('订单号') || headerLower.includes('number')) {
+            return 'col-filename';
+        } else if (headerLower.includes('题目') || headerLower.includes('title')) {
+            return 'col-title';
+        } else if (headerLower.includes('作者') && !headerLower.includes('邮箱') && !headerLower.includes('email')) {
+            return 'col-author';
+        } else if (headerLower.includes('单位') || headerLower.includes('affiliation')) {
+            return 'col-affiliation';
+        } else if (headerLower.includes('邮箱') || headerLower.includes('email')) {
+            return 'col-email';
+        } else if (headerLower.includes('关键词') || headerLower.includes('keywords')) {
+            return 'col-keywords';
+        } else if (headerLower.includes('摘要') || headerLower.includes('abstract')) {
+            return 'col-abstract';
+        } else if (headerLower.includes('致谢') || headerLower.includes('acknowledgment')) {
+            return 'col-acknowledgment';
+        } else {
+            return 'col-order';
+        }
+    }
+
+    // --- 判断是否为长文本列 ---
+    function isLongTextColumn(header) {
+        const headerLower = header.toLowerCase();
+        return headerLower.includes('摘要') ||
+               headerLower.includes('abstract') ||
+               headerLower.includes('致谢') ||
+               headerLower.includes('acknowledgment') ||
+               headerLower.includes('关键词') ||
+               headerLower.includes('keywords') ||
+               headerLower.includes('题目') ||
+               headerLower.includes('title');
+    }
+
+
+    // --- 在表格中显示结果（逻辑不变，仅配合样式） ---
+    function displayResultsInTable(data, mode = 'sn', preserveOrder = true) {
+        const thead = resultsTable.querySelector('thead');
+        const tbody = resultsTable.querySelector('tbody');
+
+        thead.innerHTML = '';
+        tbody.innerHTML = '';
+
+        if (!data || data.length === 0) {
+            resultsContainer.classList.add('hidden');
+            return;
+        }
+
+        // 根据preserveOrder参数决定是否保持原始顺序
+        const headers = preserveOrder ? getOriginalOrderHeaders(data, mode) : getSortedHeaders(data, mode);
+
+        // 创建表头行
+        const headerRow = document.createElement('tr');
+        headers.forEach(headerText => {
+            const th = document.createElement('th');
+            th.className = 'px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider ' + getColumnClass(headerText);
+            th.textContent = headerText;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+
+        // 创建数据行
+        data.forEach(rowData => {
+            if (typeof rowData !== 'object' || rowData === null) return;
+            const row = document.createElement('tr');
+            row.className = 'transition-colors';
+            headers.forEach(header => {
+                const td = document.createElement('td');
+                const content = rowData[header] || '';
+                const columnClass = getColumnClass(header);
+
+                // 基础样式
+                td.className = `text-sm ${columnClass}`;
+
+                // 判断是否为长文本内容
+                if (isLongTextColumn(header) && content.length > 100) {
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'long-text';
+                    contentDiv.textContent = content;
+                    td.appendChild(contentDiv);
+                } else {
+                    td.textContent = content;
+                }
+
+                row.appendChild(td);
+            });
+            tbody.appendChild(row);
+        });
+
+        resultsContainer.classList.remove('hidden');
+    }
+
+
+    // --- 主处理函数（未改动功能） ---
+    async function handleStart() {
+        console.log("开始处理按钮被点击");
+
+        const files = pdfFilesInput.files;
+        const selectedMode = extractionModeSelect.value;
+
+        if (files.length === 0) {
+            alert('请选择要处理的 PDF 文件！');
+            return;
+        }
+
+        // 重置状态
+        startButton.disabled = true;
+        downloadLinkContainer.innerHTML = '';
+        logContainer.innerHTML = '';
+        resultsContainer.classList.add('hidden');
+        processedDataForExcel = [];
+
+        const modeNames = {
+            'sn': 'SN信息表收集',
+            'ieee': 'IEEE信息表收集',
+            'funding': '资助信息提取',
+            'ap': 'AP信息表收集'
+        };
+
+        logMessage(`开始处理 ${files.length} 个文件，使用 ${modeNames[selectedMode]} 模式`);
+        statusDiv.textContent = `正在处理 ${files.length} 个文件...`;
+
+        try {
+            // 使用测试文件进行演示（实际应用中应该先上传文件）
+            logMessage('正在准备测试文件...');
+
+            // 根据选择的文件数量，使用对应数量的测试文件
+            const testFiles = [
+                'IEEE+资助论文收集测试文件/224081621335018069.pdf',
+                'IEEE+资助论文收集测试文件/224092814435575606.pdf',
+                'IEEE+资助论文收集测试文件/224100817252004176.pdf',
+                'IEEE+资助论文收集测试文件/224101115330045576.pdf',
+                'IEEE+资助论文收集测试文件/224102913474633576.pdf'
+            ];
+
+            const filePaths = testFiles.slice(0, Math.min(files.length, testFiles.length));
+            logMessage(`使用 ${filePaths.length} 个测试文件进行演示`);
+
+            // 调用提取API
+            logMessage(`正在调用 ${selectedMode} 模式的提取API...`);
+
+            const response = await fetch(`${BACKEND_URL}/api/extract/${selectedMode}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    file_paths: filePaths
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`API请求失败: ${response.status} - ${errorText}`);
+            }
+
+            const result = await response.json();
+            logMessage('API调用成功，正在处理结果...');
+
+            // 处理返回的结果
+            if (result.results && result.results.length > 0) {
+                processedDataForExcel = result.results;
+                logMessage(`成功处理 ${result.results.length} 个文件`, 'success');
+
+                // 显示结果
+                displayResultsInTable(processedDataForExcel, selectedMode);
+                createAndDisplayDownloadButton(selectedMode);
+                statusDiv.textContent = '处理完成！';
+            } else {
+                logMessage('没有返回有效结果', 'warning');
+                statusDiv.textContent = '处理完成，但没有有效结果';
+            }
+
+        } catch (error) {
+            console.error('处理错误:', error);
+            logMessage(`处理失败: ${error.message}`, 'error');
+            statusDiv.textContent = '处理失败！';
+        } finally {
+            startButton.disabled = false;
+        }
+    }
+    
+    // --- 创建下载按钮（未改动功能） ---
+    function createAndDisplayDownloadButton(mode = 'sn') {
+        if(processedDataForExcel.length === 0){
+             logMessage('没有可供下载的数据。', 'error');
+             return;
+        }
+
+        const button = document.createElement('button');
+        const modeNames = {
+            'sn': 'SN信息表收集',
+            'ieee': 'IEEE信息表收集',
+            'funding': '资助信息提取',
+            'ap': 'AP信息表收集'
+        };
+        const modeText = modeNames[mode] || 'SN';
+        button.textContent = `下载 ${modeText} Excel (${processedDataForExcel.length}条记录)`;
+        button.className = "btn-secondary w-full text-center block";
+
+        button.onclick = () => {
+            const orderedHeaders = getOriginalOrderHeaders(processedDataForExcel, mode);
+
+            // 创建一个新数组，其中每个对象的键都按原始顺序排列
+            const dataForSheet = processedDataForExcel.map(row => {
+                const newRow = {};
+                orderedHeaders.forEach(header => {
+                    newRow[header] = row[header] || '';
+                });
+                return newRow;
+            });
+
+            const worksheet = XLSX.utils.json_to_sheet(dataForSheet);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, '元数据');
+
+            // 基于原始顺序的表头计算列宽
+            const wscols = orderedHeaders.map(key => {
+                 const maxWidth = Math.max(
+                    ...dataForSheet.map(row => String(row[key] || "").length),
+                    key.length
+                );
+                return { wch: maxWidth + 2 };
+            });
+
+            worksheet["!cols"] = wscols;
+
+            const fileNames = {
+                'sn': 'sn_papers_metadata.xlsx',
+                'ieee': 'ieee_papers_metadata.xlsx',
+                'funding': 'funding_papers_metadata.xlsx',
+                'ap': 'ap_papers_metadata.xlsx'
+            };
+            const fileName = fileNames[mode] || 'papers_metadata.xlsx';
+            XLSX.writeFile(workbook, fileName);
+            logMessage(`${modeText} Excel 文件已在浏览器端生成并下载。`);
+        };
+        
+        downloadLinkContainer.innerHTML = ''; // 清空旧按钮
+        downloadLinkContainer.appendChild(button);
+    }
+
+    // --- 事件监听器（未改动功能） ---
+    startButton.addEventListener('click', handleStart);
+
+</script>
+</body>
+</html>

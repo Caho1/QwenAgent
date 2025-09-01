@@ -1,0 +1,31 @@
+[
+  {
+    "file_path": "IEEE+资助论文收集测试文件",
+    "filename": "IEEE+资助论文收集测试文件",
+    "file_size_mb": 0.03,
+    "extraction_time": 0.01,
+    "acknowledgment_time": 0.0,
+    "total_time": 0.01,
+    "status": "success",
+    "title": "",
+    "abstract": null,
+    "keywords": [],
+    "authors": [],
+    "first_author": "",
+    "corresponding_author": "",
+    "corresponding_email": "",
+    "affiliations": [],
+    "acknowledgment": "",
+    "has_acknowledgment": false,
+    "feedback": {
+      "title_accuracy": 5,
+      "authors_accuracy": 5,
+      "affiliations_accuracy": 5,
+      "keywords_accuracy": 5,
+      "abstract_accuracy": 0,
+      "acknowledgment_accuracy": 5,
+      "overall_accuracy": 5,
+      "notes": "5"
+    }
+  }
+]
