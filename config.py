@@ -21,7 +21,7 @@ class Config:
     API_RATE_LIMIT = "100 per minute"
     
     # LLM配置
-    LLM_API_KEY = os.environ.get('LLM_API_KEY') or 'sk-bd884acabfc8420fb852bbdd86fa276a'
+    LLM_API_KEY = 'sk-bd884acabfc8420fb852bbdd86fa276a'
     LLM_API_ENDPOINT = os.environ.get('LLM_API_ENDPOINT') or "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     LLM_MODEL = os.environ.get('LLM_MODEL') or "qwen-flash"
     LLM_MAX_TOKENS = int(os.environ.get('LLM_MAX_TOKENS', '4000'))
