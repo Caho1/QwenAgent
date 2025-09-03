@@ -118,21 +118,39 @@ class ConcurrentProcessor:
                     return result
                     
                 except Exception as e:
-                    logger.warning(f"处理文件失败 (尝试 {attempt + 1}/{self.config.retry_attempts}): {os.path.basename(file_path)} - {str(e)}")
-                    
+                    error_msg = str(e)
+                    logger.warning(f"处理文件失败 (尝试 {attempt + 1}/{self.config.retry_attempts}): {os.path.basename(file_path)} - {error_msg}")
+
                     if attempt < self.config.retry_attempts - 1:
                         # 指数退避重试
                         wait_time = self.config.retry_delay * (2 ** attempt)
+                        logger.info(f"等待 {wait_time:.1f} 秒后重试...")
                         await asyncio.sleep(wait_time)
                     else:
-                        # 最后一次尝试失败，返回错误结果
-                        return {
+                        # 最后一次尝试失败，返回详细错误结果
+                        error_details = {
                             'file': file_path,
                             'filename': os.path.basename(file_path),
-                            'error': str(e),
+                            'error': error_msg,
                             'status': 'failed',
-                            'attempts': self.config.retry_attempts
+                            'attempts': self.config.retry_attempts,
+                            'error_type': type(e).__name__,
+                            'processing_time': time.time() - start_time
                         }
+
+                        # 提供更具体的错误分类
+                        if "API密钥" in error_msg or "401" in error_msg:
+                            error_details['error_category'] = 'auth'
+                        elif "频率过高" in error_msg or "429" in error_msg:
+                            error_details['error_category'] = 'rate_limit'
+                        elif "超时" in error_msg:
+                            error_details['error_category'] = 'timeout'
+                        elif "网络" in error_msg:
+                            error_details['error_category'] = 'network'
+                        else:
+                            error_details['error_category'] = 'processing'
+
+                        return error_details
 
     async def process_single_file_with_index(self, file_path: str, process_func: Callable, mode: str, original_index: int) -> Dict[str, Any]:
         """处理单个文件并保留原始索引"""
@@ -173,6 +191,9 @@ class ConcurrentProcessor:
                     '_original_index': i,
                     '_upload_order': i + 1
                 }
+        
+        # 按照原始索引重新排序，确保返回顺序与上传顺序一致
+        results.sort(key=lambda x: x.get('_original_index', 0))
 
         # 统计结果
         successful = sum(1 for r in results if r.get('status') != 'failed' and 'error' not in r)
@@ -219,10 +240,10 @@ def get_global_processor() -> ConcurrentProcessor:
     if _global_processor is None:
         # 针对qwen-flash模型优化的配置 - 全并发模式
         config = RateLimitConfig(
-            rpm=1000,  # 略低于限制，留出安全边距
-            tpm=4500000,  # 略低于限制，留出安全边距
-            max_concurrent=120,  # 支持100+个文件同时处理
-            batch_size=100,  # 不再使用分批，但保留参数
+            rpm=1200,  # 提高RPM限制
+            tpm=5000000,  # 提高TPM限制
+            max_concurrent=100,  # 合理的并发数，避免资源耗尽
+            batch_size=50,  # 合理的批次大小
             retry_attempts=3,
             retry_delay=1.0
         )

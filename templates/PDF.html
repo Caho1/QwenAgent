@@ -522,9 +522,11 @@
             // 分批上传用户选择的文件
             logMessage('正在上传文件...');
 
-            const batchSize = 50; // 每批上传50个文件
+            const batchSize = 20; // 每批上传20个文件，避免单次请求过大
             const totalBatches = Math.ceil(files.length / batchSize);
             let allFilePaths = [];
+            let totalUploaded = 0;
+            let uploadErrors = [];
 
             for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
                 const startIndex = batchIndex * batchSize;
@@ -538,25 +540,58 @@
                     formData.append('files', batchFiles[i]);
                 }
 
-                // 上传当前批次文件到服务器
-                const uploadResponse = await fetch(`${BACKEND_URL}/api/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
+                try {
+                    // 上传当前批次文件到服务器
+                    const uploadResponse = await fetch(`${BACKEND_URL}/api/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
 
-                if (!uploadResponse.ok) {
-                    const errorText = await uploadResponse.text();
-                    throw new Error(`第 ${batchIndex + 1} 批文件上传失败: ${uploadResponse.status} - ${errorText}`);
+                    if (!uploadResponse.ok) {
+                        const errorText = await uploadResponse.text();
+                        throw new Error(`第 ${batchIndex + 1} 批文件上传失败: ${uploadResponse.status} - ${errorText}`);
+                    }
+
+                    const uploadResult = await uploadResponse.json();
+
+                    // 检查上传结果
+                    if (uploadResult.success) {
+                        const batchFilePaths = uploadResult.files.map(file => file.path);
+                        allFilePaths = allFilePaths.concat(batchFilePaths);
+                        totalUploaded += uploadResult.files.length;
+
+                        // 记录错误信息（如果有的话）
+                        if (uploadResult.errors && uploadResult.errors.length > 0) {
+                            uploadErrors = uploadErrors.concat(uploadResult.errors);
+                        }
+
+                        logMessage(`第 ${batchIndex + 1} 批上传完成: ${uploadResult.files.length} 个文件成功，${uploadResult.errors ? uploadResult.errors.length : 0} 个文件失败`);
+                    } else {
+                        throw new Error(uploadResult.error || '上传失败');
+                    }
+
+                } catch (error) {
+                    logMessage(`第 ${batchIndex + 1} 批上传失败: ${error.message}`, 'error');
+                    uploadErrors.push({
+                        batch: batchIndex + 1,
+                        error: error.message
+                    });
                 }
-
-                const uploadResult = await uploadResponse.json();
-                const batchFilePaths = uploadResult.files.map(file => file.path);
-                allFilePaths = allFilePaths.concat(batchFilePaths);
-
-                logMessage(`第 ${batchIndex + 1} 批上传完成，共 ${uploadResult.files.length} 个文件`);
             }
 
-            logMessage(`所有文件上传完成！总计 ${allFilePaths.length} 个文件`);
+            // 检查上传结果
+            if (allFilePaths.length === 0) {
+                throw new Error('所有文件上传都失败了，请检查文件格式和网络连接');
+            }
+
+            if (uploadErrors.length > 0) {
+                logMessage(`上传完成: ${totalUploaded} 个文件成功，${uploadErrors.length} 个批次失败`, 'warning');
+                for (const error of uploadErrors) {
+                    logMessage(`批次 ${error.batch} 错误: ${error.error}`, 'error');
+                }
+            } else {
+                logMessage(`所有文件上传完成！总计 ${totalUploaded} 个文件`);
+            }
 
             // 获取所有上传文件的路径
             const filePaths = allFilePaths;
@@ -564,6 +599,7 @@
 
             // 调用提取API
             logMessage(`正在调用 ${selectedMode} 模式的提取API...`);
+            logMessage(`将处理 ${filePaths.length} 个文件，使用 ${filePaths.length > 5 ? '并发' : '串行'} 处理模式`);
 
             const response = await fetch(`${BACKEND_URL}/api/extract/${selectedMode}`, {
                 method: 'POST',
@@ -578,24 +614,66 @@
 
             if (!response.ok) {
                 const errorText = await response.text();
-                throw new Error(`API请求失败: ${response.status} - ${errorText}`);
+                throw new Error(`API请求失败 (${response.status}): ${errorText}`);
             }
 
             const result = await response.json();
-            logMessage('API调用成功，正在处理结果...');
+            logMessage('API调用成功，正在验证和处理结果...');
+
+            // 验证返回结果的格式
+            if (!result.success) {
+                throw new Error(result.error || '处理请求失败');
+            }
+
+            if (!result.results || !Array.isArray(result.results)) {
+                throw new Error('服务器返回的数据格式错误');
+            }
 
             // 处理返回的结果
             if (result.results && result.results.length > 0) {
-                processedDataForExcel = result.results;
-                logMessage(`成功处理 ${result.results.length} 个文件`, 'success');
+                // 分离成功和失败的结果
+                const successfulResults = result.results.filter(r => !r.error && r.status !== 'failed');
+                const failedResults = result.results.filter(r => r.error || r.status === 'failed');
 
-                // 显示结果
-                displayResultsInTable(processedDataForExcel, selectedMode);
-                createAndDisplayDownloadButton(selectedMode);
-                statusDiv.textContent = '处理完成！';
+                processedDataForExcel = successfulResults; // 只保存成功的结果用于导出
+
+                logMessage(`处理完成: ${successfulResults.length} 个成功，${failedResults.length} 个失败`, 'success');
+
+                // 记录失败的文件
+                if (failedResults.length > 0) {
+                    logMessage(`失败的文件列表:`, 'warning');
+                    failedResults.forEach((failed, index) => {
+                        const filename = failed.filename || failed.file || `文件${index + 1}`;
+                        const errorMsg = failed.error || '未知错误';
+                        logMessage(`  - ${filename}: ${errorMsg}`, 'error');
+                    });
+                }
+
+                // 显示结果（只显示成功的）
+                if (successfulResults.length > 0) {
+                    displayResultsInTable(successfulResults, selectedMode);
+                    createAndDisplayDownloadButton(selectedMode);
+                } else {
+                    logMessage('没有成功处理的文件', 'error');
+                }
+
+                // 更新状态显示
+                if (successfulResults.length > 0) {
+                    statusDiv.textContent = `处理完成！成功: ${successfulResults.length}, 失败: ${failedResults.length}`;
+                } else {
+                    statusDiv.textContent = '处理失败，所有文件都未能成功处理';
+                }
+
+                // 显示统计信息
+                if (result.statistics) {
+                    const stats = result.statistics;
+                    logMessage(`统计信息: 总文件数 ${stats.total_files}, 成功 ${stats.successful}, 失败 ${stats.failed}`, 'info');
+                    logMessage(`处理时间: ${stats.processing_time}秒, 平均每个文件: ${stats.avg_time_per_file}秒`, 'info');
+                }
+
             } else {
-                logMessage('没有返回有效结果', 'warning');
-                statusDiv.textContent = '处理完成，但没有有效结果';
+                logMessage('没有返回任何结果', 'warning');
+                statusDiv.textContent = '处理完成，但没有返回结果';
             }
 
         } catch (error) {

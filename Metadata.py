@@ -27,6 +27,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 import pymupdf as fitz
 import regex as reg
+from config import Config
 
 # =========================
 # 工具
@@ -79,8 +80,9 @@ class PaperMeta:
 # LLM API
 # =========================
 
-API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
-API_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+# 使用config.py中的配置
+API_KEY = Config.LLM_API_KEY
+API_ENDPOINT = Config.LLM_API_ENDPOINT
 
 LLM_PROMPT_TEMPLATE = """
 你是一个专业的学术论文信息提取专家。请从以下PDF第一页的文本内容中提取论文的元数据信息。
@@ -114,9 +116,9 @@ LLM_PROMPT_TEMPLATE = """
 async def call_llm_api(text_content: str) -> dict:
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "qwen-flash",
-        "max_tokens": 4000,
-        "temperature": 0.1,
+        "model": Config.LLM_MODEL,
+        "max_tokens": Config.LLM_MAX_TOKENS,
+        "temperature": Config.LLM_TEMPERATURE,
         "messages": [{"role": "user", "content": LLM_PROMPT_TEMPLATE.format(text_content=text_content)}],
     }
     try:

@@ -9,6 +9,7 @@ import json
 import uuid
 import asyncio
 import time
+import logging
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from dataclasses import asdict
@@ -22,22 +23,12 @@ import pandas as pd
 # 导入现有的元数据提取模块
 from Metadata import extract_first_page_llm, PaperMeta, extract_acknowledgment_from_last_pages
 from concurrent_processor import get_global_processor, ConcurrentProcessor, RateLimitConfig
+from config import Config
+from log_manager import log_manager, log_operation, log_file_upload, log_file_processing, log_batch_processing, log_api_call
 
 # =========================
-# 配置管理类
+# 配置初始化
 # =========================
-class Config:
-    """应用配置管理"""
-    UPLOAD_FOLDER = 'uploads'
-    RESULTS_FOLDER = 'results'
-    MAX_CONTENT_LENGTH = 2 * 1024 * 1024 * 1024  # 2GB
-    ALLOWED_EXTENSIONS = {'pdf'}
-    
-    # 创建必要的目录
-    @classmethod
-    def init_directories(cls):
-        for folder in [cls.UPLOAD_FOLDER, cls.RESULTS_FOLDER]:
-            Path(folder).mkdir(exist_ok=True)
 
 # =========================
 # 数据处理器类
@@ -47,6 +38,20 @@ class MetadataProcessor:
     
     def __init__(self):
         self.processing_tasks = {}
+    
+    def _extract_real_filename(self, file_path: str) -> str:
+        """从文件路径中提取真实的文件名（去掉UUID前缀）"""
+        filename = os.path.basename(file_path)
+        if '_' in filename:
+            # 格式：UUID_真实文件名.pdf
+            real_filename = '_'.join(filename.split('_')[1:])
+            # 去掉.pdf扩展名
+            if real_filename.endswith('.pdf'):
+                real_filename = real_filename[:-4]
+            return real_filename
+        else:
+            # 如果没有UUID前缀，直接返回文件名（去掉扩展名）
+            return os.path.splitext(filename)[0]
     
     async def process_file(self, file_path: str, mode: str) -> Dict[str, Any]:
         """处理单个PDF文件"""
@@ -67,7 +72,7 @@ class MetadataProcessor:
                 raise ValueError(f"不支持的模式: {mode}")
                 
         except Exception as e:
-            filename = os.path.splitext(os.path.basename(file_path))[0]
+            filename = self._extract_real_filename(file_path)
             return {
                 'error': str(e),
                 'file': file_path,
@@ -81,7 +86,7 @@ class MetadataProcessor:
     
     def _format_sn_data(self, meta: PaperMeta, file_path: str) -> Dict[str, Any]:
         """格式化SN模式数据"""
-        filename = os.path.splitext(os.path.basename(file_path))[0]
+        filename = self._extract_real_filename(file_path)
         result = {
             'Number': filename,
             'Title': meta.title,
@@ -127,7 +132,7 @@ class MetadataProcessor:
                         first_author_email = author.email
                         break
         
-        filename = os.path.splitext(os.path.basename(file_path))[0]
+        filename = self._extract_real_filename(file_path)
         return {
             '订单号': filename,
             '英文题目': meta.title,
@@ -152,7 +157,7 @@ class MetadataProcessor:
         except Exception as e:
             print(f"致谢信息提取失败: {e}")
 
-        filename = os.path.splitext(os.path.basename(file_path))[0]
+        filename = self._extract_real_filename(file_path)
         return {
             '文件名': filename,
             '论文英文题目': meta.title,
@@ -175,7 +180,7 @@ class MetadataProcessor:
             None
         )
         
-        filename = os.path.splitext(os.path.basename(file_path))[0]
+        filename = self._extract_real_filename(file_path)
         result = {
             '题目': meta.title,
             '关键词': ', '.join(meta.keywords),
@@ -217,12 +222,23 @@ app.config.from_object(Config)
 CORS(app)
 
 # 初始化组件
-Config.init_directories()
+Config.init_app(app)
 processor = MetadataProcessor()
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('pdf_extraction.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def allowed_file(filename):
     """检查文件扩展名"""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in Config.ALLOWED_EXTENSIONS
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 # =========================
 # API路由定义
@@ -250,46 +266,104 @@ def health_check():
 @app.route('/api/upload', methods=['POST'])
 def upload_files():
     """文件上传接口"""
+    start_time = time.time()
     try:
         files = request.files.getlist('files')
-        if not files:
+        if not files or all(not file for file in files):
+            log_operation("文件上传", {"error": "没有上传文件"}, time.time() - start_time, "error")
             return jsonify({'error': '没有上传文件'}), 400
 
         uploaded_files = []
+        errors = []
+
         for file in files:
-            if file and allowed_file(file.filename):
+            if not file:
+                continue
+
+            if not file.filename:
+                errors.append({'filename': '未知', 'error': '文件名为空'})
+                continue
+
+            if not allowed_file(file.filename):
+                errors.append({'filename': file.filename, 'error': '不支持的文件格式，仅支持PDF文件'})
+                continue
+
+            try:
                 filename = secure_filename(file.filename)
                 file_id = str(uuid.uuid4())
-                file_path = os.path.join(Config.UPLOAD_FOLDER, f"{file_id}_{filename}")
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
                 file.save(file_path)
+
+                # 验证文件是否成功保存
+                if not os.path.exists(file_path):
+                    errors.append({'filename': filename, 'error': '文件保存失败'})
+                    continue
+
+                file_size = os.path.getsize(file_path)
+                if file_size == 0:
+                    errors.append({'filename': filename, 'error': '文件为空'})
+                    os.remove(file_path)  # 删除空文件
+                    continue
+
+                # 记录文件上传日志
+                log_file_upload(filename, file_size)
 
                 uploaded_files.append({
                     'file_id': file_id,
                     'filename': filename,
                     'path': file_path,
-                    'size': os.path.getsize(file_path)
+                    'size': file_size
                 })
 
+            except Exception as e:
+                errors.append({'filename': file.filename, 'error': f'文件处理失败: {str(e)}'})
+
+        processing_time = time.time() - start_time
+        
+        if not uploaded_files and errors:
+            log_operation("文件上传", {"error": "所有文件上传失败", "errors": errors}, processing_time, "error")
+            return jsonify({
+                'success': False,
+                'error': '所有文件上传失败',
+                'errors': errors
+            }), 400
+
+        # 记录批量上传成功日志
+        log_batch_processing(len(uploaded_files), "文件上传", processing_time, len(uploaded_files), len(errors))
+        
         return jsonify({
             'success': True,
             'files': uploaded_files,
-            'count': len(uploaded_files)
+            'count': len(uploaded_files),
+            'errors': errors if errors else None
         })
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        processing_time = time.time() - start_time
+        log_operation("文件上传", {"error": f"服务器内部错误: {str(e)}"}, processing_time, "error")
+        logging.error(f"文件上传处理失败: {e}")
+        return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
 @app.route('/api/files', methods=['GET'])
 def list_files():
     """获取已上传文件列表"""
     try:
         files = []
-        upload_dir = Path(Config.UPLOAD_FOLDER)
+        upload_dir = Path(app.config['UPLOAD_FOLDER'])
 
         for file_path in upload_dir.glob('*.pdf'):
             stat = file_path.stat()
+            # 从文件名中提取真实文件名（去掉UUID前缀）
+            full_filename = file_path.name
+            if '_' in full_filename:
+                # 格式：UUID_真实文件名.pdf
+                real_filename = '_'.join(full_filename.split('_')[1:])
+            else:
+                real_filename = full_filename
+            
             files.append({
-                'filename': file_path.name,
+                'filename': real_filename,  # 返回真实文件名
+                'full_filename': full_filename,  # 保留完整文件名用于删除等操作
                 'size': stat.st_size,
                 'upload_time': datetime.fromtimestamp(stat.st_ctime).isoformat()
             })
@@ -306,7 +380,7 @@ def list_files():
 def delete_file(file_id):
     """删除指定文件"""
     try:
-        upload_dir = Path(Config.UPLOAD_FOLDER)
+        upload_dir = Path(app.config['UPLOAD_FOLDER'])
         file_pattern = f"{file_id}_*"
 
         deleted = False
@@ -376,16 +450,48 @@ def extract_metadata(mode):
             # 串行处理
             results = []
             for file_path in valid_files:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 try:
-                    result = loop.run_until_complete(processor.process_file(file_path, mode))
+                    # 在Flask线程中创建新的事件循环
+                    import asyncio
+                    import concurrent.futures
+                    
+                    def run_async_in_thread():
+                        """在新线程中运行异步函数"""
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            return loop.run_until_complete(processor.process_file(file_path, mode))
+                        finally:
+                            loop.close()
+                    
+                    # 使用线程池执行异步函数
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(run_async_in_thread)
+                        result = future.result(timeout=300)  # 5分钟超时
+                    
                     results.append(result)
-                finally:
-                    loop.close()
+                except Exception as e:
+                    logger.error(f"串行处理文件失败: {file_path} - {str(e)}")
+                    results.append({
+                        'file': file_path,
+                        'filename': processor._extract_real_filename(file_path),
+                        'error': str(e),
+                        'status': 'failed'
+                    })
 
-        # 合并无效文件结果
+        # 合并无效文件结果，并按照原始文件路径顺序排序
         all_results = results + invalid_files
+        
+        # 创建一个映射来保持原始顺序
+        file_order_map = {file_path: i for i, file_path in enumerate(file_paths)}
+        
+        # 按照原始文件路径顺序排序所有结果
+        def get_original_order(result):
+            file_path = result.get('file', '')
+            return file_order_map.get(file_path, 999999)  # 无效文件排在最后
+        
+        all_results.sort(key=get_original_order)
+        
         successful_count = len([r for r in results if r.get('status') != 'failed' and 'error' not in r])
 
         return jsonify({
@@ -446,6 +552,11 @@ def extract_batch():
                 concurrent_processor.process_batch(valid_files, process_wrapper, mode, progress_callback)
             )
             processing_time = time.time() - start_time
+            
+            # 确保结果按照原始文件路径顺序排序
+            file_order_map = {file_path: i for i, file_path in enumerate(valid_files)}
+            results.sort(key=lambda r: file_order_map.get(r.get('file', ''), 999999))
+            
         finally:
             loop.close()
 
@@ -541,6 +652,8 @@ def batch_extract():
 @app.route('/process', methods=['POST'])
 def process_files():
     """处理PDF文件的主接口（流式响应）"""
+    start_time = time.time()
+    
     def generate():
         try:
             # 获取上传的文件和模式
@@ -548,8 +661,12 @@ def process_files():
             mode = request.form.get('mode', 'sn')
 
             if not files:
+                log_operation("文件处理", {"error": "没有上传文件"}, time.time() - start_time, "error")
                 yield json.dumps({'type': 'error', 'message': '没有上传文件'}) + '\n'
                 return
+
+            # 记录开始处理日志
+            log_operation("文件处理", {"file_count": len(files), "mode": mode})
 
             yield json.dumps({
                 'type': 'status',
@@ -561,7 +678,8 @@ def process_files():
             for file in files:
                 if file and allowed_file(file.filename):
                     filename = secure_filename(file.filename)
-                    file_path = os.path.join(Config.UPLOAD_FOLDER, filename)
+                    file_id = str(uuid.uuid4())
+                    file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
                     file.save(file_path)
                     saved_files.append(file_path)
 
@@ -571,10 +689,21 @@ def process_files():
             }) + '\n'
 
             # 处理每个文件
+            success_count = 0
+            failed_count = 0
+            
             for i, file_path in enumerate(saved_files, 1):
+                file_start_time = time.time()
+                # 提取真实文件名（去掉UUID前缀）
+                full_filename = os.path.basename(file_path)
+                if '_' in full_filename:
+                    real_filename = '_'.join(full_filename.split('_')[1:])
+                else:
+                    real_filename = full_filename
+                
                 yield json.dumps({
                     'type': 'status',
-                    'message': f'正在处理第 {i}/{len(saved_files)} 个文件: {os.path.basename(file_path)}'
+                    'message': f'正在处理第 {i}/{len(saved_files)} 个文件: {real_filename}'
                 }) + '\n'
 
                 # 异步处理文件
@@ -582,8 +711,13 @@ def process_files():
                 asyncio.set_event_loop(loop)
                 try:
                     result = loop.run_until_complete(processor.process_file(file_path, mode))
+                    file_processing_time = time.time() - file_start_time
 
                     if 'error' not in result:
+                        success_count += 1
+                        # 记录成功处理日志
+                        log_file_processing(real_filename, mode, file_processing_time, "success")
+                        
                         yield json.dumps({
                             'type': 'data_row',
                             'data': result
@@ -591,23 +725,33 @@ def process_files():
 
                         yield json.dumps({
                             'type': 'success',
-                            'message': f'✅ {os.path.basename(file_path)} 处理完成'
+                            'message': f'✅ {real_filename} 处理完成'
                         }) + '\n'
                     else:
+                        failed_count += 1
+                        # 记录失败处理日志
+                        log_file_processing(real_filename, mode, file_processing_time, "error", result["error"])
+                        
                         yield json.dumps({
                             'type': 'error',
-                            'message': f'❌ {os.path.basename(file_path)} 处理失败: {result["error"]}'
+                            'message': f'❌ {real_filename} 处理失败: {result["error"]}'
                         }) + '\n'
 
                 finally:
                     loop.close()
 
+            # 记录批量处理完成日志
+            total_time = time.time() - start_time
+            log_batch_processing(len(saved_files), mode, total_time, success_count, failed_count)
+            
             yield json.dumps({
                 'type': 'status',
                 'message': '所有文件处理完成'
             }) + '\n'
 
         except Exception as e:
+            processing_time = time.time() - start_time
+            log_operation("文件处理", {"error": str(e)}, processing_time, "error")
             yield json.dumps({
                 'type': 'error',
                 'message': f'处理过程中发生错误: {str(e)}'
@@ -632,7 +776,7 @@ def export_excel():
         # 生成文件名
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"{mode}_metadata_{timestamp}.xlsx"
-        file_path = os.path.join(Config.RESULTS_FOLDER, filename)
+        file_path = os.path.join(app.config['RESULTS_FOLDER'], filename)
 
         # 保存Excel文件
         df.to_excel(file_path, index=False, engine='openpyxl')
@@ -661,7 +805,7 @@ def export_json():
         # 生成文件名
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"{mode}_metadata_{timestamp}.json"
-        file_path = os.path.join(Config.RESULTS_FOLDER, filename)
+        file_path = os.path.join(app.config['RESULTS_FOLDER'], filename)
 
         # 保存JSON文件
         export_data = {
@@ -697,6 +841,8 @@ def get_progress(task_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+
 # =========================
 # 错误处理
 # =========================
@@ -719,8 +865,8 @@ if __name__ == '__main__':
     print("🚀 PDF元数据提取系统启动中...")
     print("📊 支持的提取模式: SN, IEEE, 资助信息, AP")
     print("🌐 访问地址: http://localhost:5000")
-    print("📁 上传目录:", Config.UPLOAD_FOLDER)
-    print("📁 结果目录:", Config.RESULTS_FOLDER)
+    print("📁 上传目录:", app.config['UPLOAD_FOLDER'])
+    print("📁 结果目录:", app.config['RESULTS_FOLDER'])
     print("\n🔗 API接口列表:")
     print("  GET  /                     - 主页界面")
     print("  GET  /api/health           - 健康检查")
@@ -732,6 +878,7 @@ if __name__ == '__main__':
     print("  POST /api/export/excel     - 导出Excel")
     print("  POST /api/export/json      - 导出JSON")
     print("  POST /process              - 流式处理")
-    print("\n✨ 系统就绪，等待请求...")
+    print("\n📝 日志系统已启用，日志文件保存在 log/ 目录")
+    print("✨ 系统就绪，等待请求...")
 
     app.run(debug=True, host='0.0.0.0', port=5000)

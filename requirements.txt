@@ -1,10 +1,6 @@
-# LangGraph 框架依赖
-langgraph>=0.0.40
-langchain>=0.1.0
-langchain-core>=0.1.0
-
 # PDF处理依赖
 PyMuPDF>=1.23.0
+fitz>=1.23.0
 
 # Flask Web框架依赖
 Flask>=2.3.0
@@ -24,3 +20,6 @@ requests>=2.28.0
 pydantic>=2.0.0
 typing-extensions>=4.0.0
 regex>=2023.0.0
+python-multipart>=0.0.5
+uvloop>=0.17.0
+colorama>=0.4.6
