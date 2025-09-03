@@ -14,7 +14,7 @@ class Config:
     # 文件上传配置
     UPLOAD_FOLDER = 'uploads'
     RESULTS_FOLDER = 'results'
-    MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100MB
+    MAX_CONTENT_LENGTH = 2 * 1024 * 1024 * 1024  # 2GB
     ALLOWED_EXTENSIONS = {'pdf'}
     
     # API配置

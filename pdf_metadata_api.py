@@ -30,7 +30,7 @@ class Config:
     """应用配置管理"""
     UPLOAD_FOLDER = 'uploads'
     RESULTS_FOLDER = 'results'
-    MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100MB
+    MAX_CONTENT_LENGTH = 2 * 1024 * 1024 * 1024  # 2GB
     ALLOWED_EXTENSIONS = {'pdf'}
     
     # 创建必要的目录

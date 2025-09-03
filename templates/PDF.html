@@ -519,20 +519,48 @@
         statusDiv.textContent = `正在处理 ${files.length} 个文件...`;
 
         try {
-            // 使用测试文件进行演示（实际应用中应该先上传文件）
-            logMessage('正在准备测试文件...');
+            // 分批上传用户选择的文件
+            logMessage('正在上传文件...');
 
-            // 根据选择的文件数量，使用对应数量的测试文件
-            const testFiles = [
-                'IEEE+资助论文收集测试文件/224081621335018069.pdf',
-                'IEEE+资助论文收集测试文件/224092814435575606.pdf',
-                'IEEE+资助论文收集测试文件/224100817252004176.pdf',
-                'IEEE+资助论文收集测试文件/224101115330045576.pdf',
-                'IEEE+资助论文收集测试文件/224102913474633576.pdf'
-            ];
+            const batchSize = 50; // 每批上传50个文件
+            const totalBatches = Math.ceil(files.length / batchSize);
+            let allFilePaths = [];
 
-            const filePaths = testFiles.slice(0, Math.min(files.length, testFiles.length));
-            logMessage(`使用 ${filePaths.length} 个测试文件进行演示`);
+            for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+                const startIndex = batchIndex * batchSize;
+                const endIndex = Math.min(startIndex + batchSize, files.length);
+                const batchFiles = Array.from(files).slice(startIndex, endIndex);
+
+                logMessage(`正在上传第 ${batchIndex + 1}/${totalBatches} 批文件 (${batchFiles.length} 个文件)...`);
+
+                const formData = new FormData();
+                for (let i = 0; i < batchFiles.length; i++) {
+                    formData.append('files', batchFiles[i]);
+                }
+
+                // 上传当前批次文件到服务器
+                const uploadResponse = await fetch(`${BACKEND_URL}/api/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!uploadResponse.ok) {
+                    const errorText = await uploadResponse.text();
+                    throw new Error(`第 ${batchIndex + 1} 批文件上传失败: ${uploadResponse.status} - ${errorText}`);
+                }
+
+                const uploadResult = await uploadResponse.json();
+                const batchFilePaths = uploadResult.files.map(file => file.path);
+                allFilePaths = allFilePaths.concat(batchFilePaths);
+
+                logMessage(`第 ${batchIndex + 1} 批上传完成，共 ${uploadResult.files.length} 个文件`);
+            }
+
+            logMessage(`所有文件上传完成！总计 ${allFilePaths.length} 个文件`);
+
+            // 获取所有上传文件的路径
+            const filePaths = allFilePaths;
+            logMessage(`准备处理 ${filePaths.length} 个文件`);
 
             // 调用提取API
             logMessage(`正在调用 ${selectedMode} 模式的提取API...`);
@@ -543,7 +571,8 @@
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    file_paths: filePaths
+                    file_paths: filePaths,
+                    use_concurrent: filePaths.length > 5  // 超过5个文件启用并发处理
                 })
             });
 
