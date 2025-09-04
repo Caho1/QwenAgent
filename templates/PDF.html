@@ -284,10 +284,7 @@
     </div>
 
 <script>
-    // --- 引入 SheetJS 用于生成 Excel ---
-    const sheetJsScript = document.createElement('script');
-    sheetJsScript.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
-    document.head.appendChild(sheetJsScript);
+    // --- Excel文件生成已移至后端处理 ---
 
     // --- 后端服务地址（内置） ---
     const BACKEND_URL = '';
@@ -366,30 +363,81 @@
         return [...headerSet].sort((a, b) => getHeaderRank(a) - getHeaderRank(b));
     }
 
-    // --- 获取保持原始顺序的表头 ---
+    // --- 清理显示数据，移除内部处理字段（仅用于显示） ---
+    function cleanDisplayData(data) {
+        // 需要移除的内部字段（仅用于显示）
+        const internalFields = new Set([
+            '_original_index',
+            '_upload_order',
+            'attempt',
+            'processing_time',
+            'filename',  // 移除通用filename字段
+            'file'       // 移除文件路径字段
+        ]);
+
+        return data.map(item => {
+            // 创建清理后的记录
+            const cleanedItem = {};
+            for (const [key, value] of Object.entries(item)) {
+                if (!internalFields.has(key)) {
+                    cleanedItem[key] = value;
+                }
+            }
+            return cleanedItem;
+        });
+    }
+
+    // --- 获取保持原始顺序的表头（仅用于显示） ---
     function getOriginalOrderHeaders(data, mode = 'sn') {
         if (!data || data.length === 0) return [];
 
-        // 使用第一个有效数据对象的键顺序作为基准
-        const firstValidRow = data.find(row => typeof row === 'object' && row !== null);
-        if (!firstValidRow) return [];
+        // 先清理显示数据
+        const cleanedData = cleanDisplayData(data);
+        if (cleanedData.length === 0) return [];
 
-        // 获取第一行的键顺序
-        const firstRowHeaders = Object.keys(firstValidRow);
+        // 根据模式定义字段顺序
+        const columnOrders = {
+            'ieee': ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'],
+            'sn': ['Number', 'Title', 'SubTitle', 'Author 1', 'Affiliation 1', 'Author 2', 'Affiliation 2',
+                   'Author 3', 'Affiliation 3', 'Author 4', 'Affiliation 4', 'Author 5', 'Affiliation 5',
+                   'Corresponding Author', "Corresponding author's email"],
+            'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
+                       '通讯作者邮箱', '关键词', '摘要', '致谢'],
+            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓', '第一作者名', '通讯作者姓', '通讯作者名']
+        };
 
-        // 收集所有可能的表头
-        const allHeadersSet = new Set();
-        data.forEach(row => {
+        // 收集所有实际存在的字段
+        const allFieldsSet = new Set();
+        cleanedData.forEach(row => {
             if (typeof row === 'object' && row !== null) {
-                Object.keys(row).forEach(key => allHeadersSet.add(key));
+                Object.keys(row).forEach(key => allFieldsSet.add(key));
             }
         });
 
-        // 保持第一行的顺序，然后添加其他列
-        const orderedHeaders = [...firstRowHeaders];
-        const remainingHeaders = [...allHeadersSet].filter(header => !firstRowHeaders.includes(header));
+        // 如果有预定义的字段顺序，使用它
+        if (columnOrders[mode]) {
+            const orderedHeaders = [];
+            // 按预定义顺序添加字段
+            columnOrders[mode].forEach(col => {
+                if (allFieldsSet.has(col)) {
+                    orderedHeaders.push(col);
+                    allFieldsSet.delete(col);
+                }
+            });
 
-        return [...orderedHeaders, ...remainingHeaders];
+            // 添加剩余字段
+            orderedHeaders.push(...Array.from(allFieldsSet).sort());
+            return orderedHeaders;
+        }
+
+        // 如果没有预定义顺序，使用第一行的键顺序
+        const firstValidRow = cleanedData.find(row => typeof row === 'object' && row !== null);
+        if (!firstValidRow) return [];
+
+        const firstRowHeaders = Object.keys(firstValidRow);
+        const remainingHeaders = [...allFieldsSet].filter(header => !firstRowHeaders.includes(header));
+
+        return [...firstRowHeaders, ...remainingHeaders];
     }
 
     // --- 获取列的CSS类 ---
@@ -444,8 +492,11 @@
             return;
         }
 
+        // 对于显示，清理内部字段但保留所有数据（包括错误的）
+        const displayData = cleanDisplayData(data);
+
         // 根据preserveOrder参数决定是否保持原始顺序
-        const headers = preserveOrder ? getOriginalOrderHeaders(data, mode) : getSortedHeaders(data, mode);
+        const headers = preserveOrder ? getOriginalOrderHeaders(data, mode) : getSortedHeaders(displayData, mode);
 
         // 创建表头行
         const headerRow = document.createElement('tr');
@@ -458,7 +509,7 @@
         thead.appendChild(headerRow);
 
         // 创建数据行
-        data.forEach(rowData => {
+        displayData.forEach(rowData => {
             if (typeof rowData !== 'object' || rowData === null) return;
             const row = document.createElement('tr');
             row.className = 'transition-colors';
@@ -703,42 +754,59 @@
         button.textContent = `下载 ${modeText} Excel (${processedDataForExcel.length}条记录)`;
         button.className = "btn-secondary w-full text-center block";
 
-        button.onclick = () => {
-            const orderedHeaders = getOriginalOrderHeaders(processedDataForExcel, mode);
+        button.onclick = async () => {
+            if (processedDataForExcel.length === 0) {
+                logMessage('没有数据可供下载。', 'error');
+                return;
+            }
 
-            // 创建一个新数组，其中每个对象的键都按原始顺序排列
-            const dataForSheet = processedDataForExcel.map(row => {
-                const newRow = {};
-                orderedHeaders.forEach(header => {
-                    newRow[header] = row[header] || '';
+            try {
+                logMessage('正在准备下载文件...', 'info');
+
+                // 调用后端下载接口
+                const response = await fetch('/api/download/excel', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        results: processedDataForExcel,
+                        mode: mode
+                    })
                 });
-                return newRow;
-            });
 
-            const worksheet = XLSX.utils.json_to_sheet(dataForSheet);
-            const workbook = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(workbook, worksheet, '元数据');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || '下载失败');
+                }
 
-            // 基于原始顺序的表头计算列宽
-            const wscols = orderedHeaders.map(key => {
-                 const maxWidth = Math.max(
-                    ...dataForSheet.map(row => String(row[key] || "").length),
-                    key.length
-                );
-                return { wch: maxWidth + 2 };
-            });
+                // 获取文件名
+                const contentDisposition = response.headers.get('Content-Disposition');
+                let filename = `${mode}_papers_metadata.xlsx`;
+                if (contentDisposition) {
+                    const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+                    if (filenameMatch) {
+                        filename = filenameMatch[1];
+                    }
+                }
 
-            worksheet["!cols"] = wscols;
+                // 下载文件
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
 
-            const fileNames = {
-                'sn': 'sn_papers_metadata.xlsx',
-                'ieee': 'ieee_papers_metadata.xlsx',
-                'funding': 'funding_papers_metadata.xlsx',
-                'ap': 'ap_papers_metadata.xlsx'
-            };
-            const fileName = fileNames[mode] || 'papers_metadata.xlsx';
-            XLSX.writeFile(workbook, fileName);
-            logMessage(`${modeText} Excel 文件已在浏览器端生成并下载。`);
+                logMessage(`${modeText} Excel 文件已下载完成。`, 'success');
+            } catch (error) {
+                console.error('下载失败:', error);
+                logMessage(`下载失败: ${error.message}`, 'error');
+            }
         };
         
         downloadLinkContainer.innerHTML = ''; // 清空旧按钮

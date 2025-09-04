@@ -40,19 +40,50 @@ class MetadataProcessor:
         self.processing_tasks = {}
     
     def _extract_real_filename(self, file_path: str) -> str:
-        """从文件路径中提取真实的文件名（去掉UUID前缀）"""
+        """从文件路径中提取真实的文件名（去掉UUID前缀），保留扩展名"""
         filename = os.path.basename(file_path)
         if '_' in filename:
-            # 格式：UUID_真实文件名.pdf
-            real_filename = '_'.join(filename.split('_')[1:])
-            # 去掉.pdf扩展名
-            if real_filename.endswith('.pdf'):
-                real_filename = real_filename[:-4]
-            return real_filename
-        else:
-            # 如果没有UUID前缀，直接返回文件名（去掉扩展名）
-            return os.path.splitext(filename)[0]
-    
+            # 检查第一部分是否是UUID格式（8-4-4-4-12个字符）
+            parts = filename.split('_', 1)
+            if len(parts) == 2:
+                potential_uuid = parts[0]
+                # 简单的UUID格式检查：长度为36且包含4个连字符
+                if len(potential_uuid) == 36 and potential_uuid.count('-') == 4:
+                    # 格式：UUID_真实文件名.pdf
+                    return parts[1]
+
+        # 如果没有UUID前缀，直接返回文件名
+        return filename
+
+    def _clean_export_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """清理导出数据，移除内部处理字段"""
+        # 需要移除的内部字段
+        internal_fields = {
+            '_original_index',
+            '_upload_order',
+            'attempt',
+            'processing_time',
+            'filename',  # 移除通用filename字段
+            'file',      # 移除文件路径字段
+            'status'     # 移除状态字段（仅保留有错误的记录中的error字段）
+        }
+
+        cleaned_data = []
+        for item in data:
+            # 跳过有错误的记录
+            if item.get('error') or item.get('status') == 'failed':
+                continue
+
+            # 创建清理后的记录
+            cleaned_item = {}
+            for key, value in item.items():
+                if key not in internal_fields:
+                    cleaned_item[key] = value
+
+            cleaned_data.append(cleaned_item)
+
+        return cleaned_data
+
     async def process_file(self, file_path: str, mode: str) -> Dict[str, Any]:
         """处理单个PDF文件"""
         try:
@@ -73,6 +104,12 @@ class MetadataProcessor:
                 
         except Exception as e:
             filename = self._extract_real_filename(file_path)
+
+            # 为IEEE模式的订单号去除.pdf扩展名
+            order_number = filename
+            if mode == 'ieee' and order_number.lower().endswith('.pdf'):
+                order_number = order_number[:-4]
+
             return {
                 'error': str(e),
                 'file': file_path,
@@ -80,7 +117,7 @@ class MetadataProcessor:
                 # 根据模式添加对应的文件名字段
                 '文件名': filename,  # 资助信息和AP模式
                 'Number': filename,  # SN模式
-                '订单号': filename,  # IEEE模式
+                '订单号': order_number,  # IEEE模式（去除.pdf扩展名）
                 'status': 'failed'
             }
     
@@ -120,7 +157,7 @@ class MetadataProcessor:
         """格式化IEEE模式数据"""
         # 提取所有作者姓名，去除上标
         all_authors = ', '.join([author.name for author in meta.authors])
-        
+
         # 获取第一作者邮箱，如果没有则取通讯作者邮箱
         first_author_email = ''
         if meta.authors:
@@ -131,15 +168,21 @@ class MetadataProcessor:
                     if author.is_corresponding_author and author.email:
                         first_author_email = author.email
                         break
-        
+
         filename = self._extract_real_filename(file_path)
+        # 对于订单号字段，去除.pdf扩展名
+        order_number = filename
+        if order_number.lower().endswith('.pdf'):
+            order_number = order_number[:-4]
+
+        # 按照指定顺序返回字段
         return {
-            '订单号': filename,
+            '订单号': order_number,
             '英文题目': meta.title,
             '英文副标': '',  # 需要从标题中分离
             '作者姓名': all_authors,
             '第一作者邮箱': first_author_email,
-            'filename': filename  # 添加通用filename字段
+            'filename': filename  # 添加通用filename字段（用于内部处理）
         }
     
     def _format_funding_data(self, meta: PaperMeta, file_path: str) -> Dict[str, Any]:
@@ -444,6 +487,7 @@ def extract_metadata(mode):
                 results = loop.run_until_complete(
                     concurrent_processor.process_batch(valid_files, process_wrapper, mode)
                 )
+                # 并发处理器内部已经按原始索引排序，无需额外排序
             finally:
                 loop.close()
         else:
@@ -452,9 +496,8 @@ def extract_metadata(mode):
             for file_path in valid_files:
                 try:
                     # 在Flask线程中创建新的事件循环
-                    import asyncio
                     import concurrent.futures
-                    
+
                     def run_async_in_thread():
                         """在新线程中运行异步函数"""
                         loop = asyncio.new_event_loop()
@@ -552,10 +595,8 @@ def extract_batch():
                 concurrent_processor.process_batch(valid_files, process_wrapper, mode, progress_callback)
             )
             processing_time = time.time() - start_time
-            
-            # 确保结果按照原始文件路径顺序排序
-            file_order_map = {file_path: i for i, file_path in enumerate(valid_files)}
-            results.sort(key=lambda r: file_order_map.get(r.get('file', ''), 999999))
+
+            # 并发处理器内部已经按原始索引排序，无需额外排序
             
         finally:
             loop.close()
@@ -695,11 +736,7 @@ def process_files():
             for i, file_path in enumerate(saved_files, 1):
                 file_start_time = time.time()
                 # 提取真实文件名（去掉UUID前缀）
-                full_filename = os.path.basename(file_path)
-                if '_' in full_filename:
-                    real_filename = '_'.join(full_filename.split('_')[1:])
-                else:
-                    real_filename = full_filename
+                real_filename = processor._extract_real_filename(file_path)
                 
                 yield json.dumps({
                     'type': 'status',
@@ -770,8 +807,42 @@ def export_excel():
         if not results:
             return jsonify({'error': '没有数据可导出'}), 400
 
+        # 清理数据，移除内部处理字段
+        cleaned_results = processor._clean_export_data(results)
+
+        if not cleaned_results:
+            return jsonify({'error': '没有有效数据可导出'}), 400
+
+        # 根据模式定义字段顺序
+        column_orders = {
+            'ieee': ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'],
+            'sn': ['Number', 'Title', 'SubTitle', 'Author 1', 'Affiliation 1', 'Author 2', 'Affiliation 2',
+                   'Author 3', 'Affiliation 3', 'Author 4', 'Affiliation 4', 'Author 5', 'Affiliation 5',
+                   'Corresponding Author', "Corresponding author's email"],
+            'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
+                       '通讯作者邮箱', '关键词', '摘要', '致谢'],
+            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓', '第一作者名', '通讯作者姓', '通讯作者名']
+        }
+
+        # 获取当前模式的字段顺序
+        if mode in column_orders:
+            # 按指定顺序重新组织数据
+            ordered_results = []
+            for item in cleaned_results:
+                ordered_item = {}
+                # 先按指定顺序添加字段
+                for col in column_orders[mode]:
+                    if col in item:
+                        ordered_item[col] = item[col]
+                # 再添加其他字段（如果有的话）
+                for key, value in item.items():
+                    if key not in ordered_item:
+                        ordered_item[key] = value
+                ordered_results.append(ordered_item)
+            cleaned_results = ordered_results
+
         # 创建DataFrame
-        df = pd.DataFrame(results)
+        df = pd.DataFrame(cleaned_results)
 
         # 生成文件名
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -802,6 +873,12 @@ def export_json():
         if not results:
             return jsonify({'error': '没有数据可导出'}), 400
 
+        # 清理数据，移除内部处理字段
+        cleaned_results = processor._clean_export_data(results)
+
+        if not cleaned_results:
+            return jsonify({'error': '没有有效数据可导出'}), 400
+
         # 生成文件名
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"{mode}_metadata_{timestamp}.json"
@@ -811,8 +888,8 @@ def export_json():
         export_data = {
             'mode': mode,
             'export_time': datetime.now().isoformat(),
-            'count': len(results),
-            'results': results
+            'count': len(cleaned_results),
+            'results': cleaned_results
         }
 
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -823,6 +900,95 @@ def export_json():
             as_attachment=True,
             download_name=filename,
             mimetype='application/json'
+        )
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/download/excel', methods=['POST'])
+def download_excel():
+    """直接下载Excel文件接口"""
+    try:
+        data = request.get_json()
+        results = data.get('results', [])
+        mode = data.get('mode', 'sn')
+
+        if not results:
+            return jsonify({'error': '没有数据可下载'}), 400
+
+        # 清理数据，移除内部处理字段
+        cleaned_results = processor._clean_export_data(results)
+
+        if not cleaned_results:
+            return jsonify({'error': '没有有效数据可下载'}), 400
+
+        # 根据模式定义字段顺序
+        column_orders = {
+            'ieee': ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'],
+            'sn': ['Number', 'Title', 'SubTitle', 'Author 1', 'Affiliation 1', 'Author 2', 'Affiliation 2',
+                   'Author 3', 'Affiliation 3', 'Author 4', 'Affiliation 4', 'Author 5', 'Affiliation 5',
+                   'Corresponding Author', "Corresponding author's email"],
+            'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
+                       '通讯作者邮箱', '关键词', '摘要', '致谢'],
+            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓', '第一作者名', '通讯作者姓', '通讯作者名']
+        }
+
+        # 按指定顺序重新组织数据
+        if mode in column_orders:
+            ordered_results = []
+            for item in cleaned_results:
+                ordered_item = {}
+                # 先按指定顺序添加字段
+                for col in column_orders[mode]:
+                    if col in item:
+                        ordered_item[col] = item[col]
+                # 再添加其他字段（如果有的话）
+                for key, value in item.items():
+                    if key not in ordered_item:
+                        ordered_item[key] = value
+                ordered_results.append(ordered_item)
+            cleaned_results = ordered_results
+
+        # 创建DataFrame，明确指定列顺序
+        if mode in column_orders and cleaned_results:
+            # 获取实际存在的列
+            all_columns = set()
+            for item in cleaned_results:
+                all_columns.update(item.keys())
+
+            # 按预定义顺序排列列，然后添加其他列
+            ordered_columns = []
+            for col in column_orders[mode]:
+                if col in all_columns:
+                    ordered_columns.append(col)
+                    all_columns.remove(col)
+
+            # 添加剩余列
+            ordered_columns.extend(sorted(all_columns))
+
+            # 创建DataFrame并指定列顺序
+            df = pd.DataFrame(cleaned_results, columns=ordered_columns)
+        else:
+            df = pd.DataFrame(cleaned_results)
+
+        # 生成文件名
+        mode_names = {
+            'sn': 'sn_papers_metadata',
+            'ieee': 'ieee_papers_metadata',
+            'funding': 'funding_papers_metadata',
+            'ap': 'ap_papers_metadata'
+        }
+        filename = f"{mode_names.get(mode, 'papers_metadata')}.xlsx"
+        file_path = os.path.join(app.config['RESULTS_FOLDER'], filename)
+
+        # 保存Excel文件
+        df.to_excel(file_path, index=False, engine='openpyxl')
+
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
 
     except Exception as e:
@@ -877,6 +1043,7 @@ if __name__ == '__main__':
     print("  POST /api/extract/batch    - 批量提取")
     print("  POST /api/export/excel     - 导出Excel")
     print("  POST /api/export/json      - 导出JSON")
+    print("  POST /api/download/excel   - 直接下载Excel")
     print("  POST /process              - 流式处理")
     print("\n📝 日志系统已启用，日志文件保存在 log/ 目录")
     print("✨ 系统就绪，等待请求...")
