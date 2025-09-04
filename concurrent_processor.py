@@ -128,9 +128,14 @@ class ConcurrentProcessor:
                         await asyncio.sleep(wait_time)
                     else:
                         # 最后一次尝试失败，返回详细错误结果
+                        filename = os.path.basename(file_path)
+                        # 去掉.pdf扩展名
+                        if filename.lower().endswith('.pdf'):
+                            filename = filename[:-4]
+
                         error_details = {
                             'file': file_path,
-                            'filename': os.path.basename(file_path),
+                            'filename': filename,
                             'error': error_msg,
                             'status': 'failed',
                             'attempts': self.config.retry_attempts,
@@ -183,9 +188,14 @@ class ConcurrentProcessor:
         # 处理异常结果
         for i, result in enumerate(results):
             if isinstance(result, Exception):
+                filename = os.path.basename(file_paths[i])
+                # 去掉.pdf扩展名
+                if filename.lower().endswith('.pdf'):
+                    filename = filename[:-4]
+
                 results[i] = {
                     'file': file_paths[i],
-                    'filename': os.path.basename(file_paths[i]),
+                    'filename': filename,
                     'error': str(result),
                     'status': 'failed',
                     '_original_index': i,

@@ -108,6 +108,9 @@ LLM_PROMPT_TEMPLATE = """
 
 注意：作者顺序必须与视觉阅读顺序一致：行从上到下，行内从左到右。
 
+关于关键词：论文中可能为"Keyword"/"Keywords", 如果不是"Keyword"/"Keywords",则关键词留空,关键词有可能是缩写,请不要忽略,比如“Gp” “LLM”等。
+
+
 以下是PDF第一页的文本内容：
 {text_content}
 """

@@ -40,7 +40,7 @@ class MetadataProcessor:
         self.processing_tasks = {}
     
     def _extract_real_filename(self, file_path: str) -> str:
-        """从文件路径中提取真实的文件名（去掉UUID前缀），保留扩展名"""
+        """从文件路径中提取真实的文件名（去掉UUID前缀和.pdf扩展名）"""
         filename = os.path.basename(file_path)
         if '_' in filename:
             # 检查第一部分是否是UUID格式（8-4-4-4-12个字符）
@@ -50,9 +50,12 @@ class MetadataProcessor:
                 # 简单的UUID格式检查：长度为36且包含4个连字符
                 if len(potential_uuid) == 36 and potential_uuid.count('-') == 4:
                     # 格式：UUID_真实文件名.pdf
-                    return parts[1]
+                    filename = parts[1]
 
-        # 如果没有UUID前缀，直接返回文件名
+        # 去掉.pdf扩展名
+        if filename.lower().endswith('.pdf'):
+            filename = filename[:-4]
+
         return filename
 
     def _clean_export_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -105,19 +108,14 @@ class MetadataProcessor:
         except Exception as e:
             filename = self._extract_real_filename(file_path)
 
-            # 为IEEE模式的订单号去除.pdf扩展名
-            order_number = filename
-            if mode == 'ieee' and order_number.lower().endswith('.pdf'):
-                order_number = order_number[:-4]
-
             return {
                 'error': str(e),
                 'file': file_path,
                 'filename': filename,
-                # 根据模式添加对应的文件名字段
+                # 根据模式添加对应的文件名字段（现在filename已经去掉了.pdf扩展名）
                 '文件名': filename,  # 资助信息和AP模式
                 'Number': filename,  # SN模式
-                '订单号': order_number,  # IEEE模式（去除.pdf扩展名）
+                '订单号': filename,  # IEEE模式
                 'status': 'failed'
             }
     
@@ -169,15 +167,12 @@ class MetadataProcessor:
                         first_author_email = author.email
                         break
 
+        # 获取去掉.pdf扩展名的文件名
         filename = self._extract_real_filename(file_path)
-        # 对于订单号字段，去除.pdf扩展名
-        order_number = filename
-        if order_number.lower().endswith('.pdf'):
-            order_number = order_number[:-4]
 
         # 按照指定顺序返回字段
         return {
-            '订单号': order_number,
+            '订单号': filename,  # 现在_extract_real_filename已经去掉了.pdf扩展名
             '英文题目': meta.title,
             '英文副标': '',  # 需要从标题中分离
             '作者姓名': all_authors,
@@ -222,7 +217,7 @@ class MetadataProcessor:
             (author for author in meta.authors if author.is_corresponding_author),
             None
         )
-        
+
         filename = self._extract_real_filename(file_path)
         result = {
             '题目': meta.title,
@@ -231,19 +226,19 @@ class MetadataProcessor:
             '文件名': filename,
             'filename': filename  # 添加通用filename字段
         }
-        
-        # 第一作者姓名分解
+
+        # 第一作者完整姓名
         if first_author:
-            name_parts = first_author.name.split()
-            result['第一作者姓'] = name_parts[-1] if name_parts else ''
-            result['第一作者名'] = ' '.join(name_parts[:-1]) if len(name_parts) > 1 else ''
-        
-        # 通讯作者姓名分解（仅当通讯作者非第一作者时）
-        if corresponding_author and corresponding_author != first_author:
-            name_parts = corresponding_author.name.split()
-            result['通讯作者姓'] = name_parts[-1] if name_parts else ''
-            result['通讯作者名'] = ' '.join(name_parts[:-1]) if len(name_parts) > 1 else ''
-        
+            result['第一作者姓名'] = first_author.name
+        else:
+            result['第一作者姓名'] = ''
+
+        # 通讯作者完整姓名
+        if corresponding_author:
+            result['通讯作者姓名'] = corresponding_author.name
+        else:
+            result['通讯作者姓名'] = ''
+
         return result
     
     def _get_author_affiliation(self, author, affiliations) -> str:
@@ -396,16 +391,20 @@ def list_files():
 
         for file_path in upload_dir.glob('*.pdf'):
             stat = file_path.stat()
-            # 从文件名中提取真实文件名（去掉UUID前缀）
+            # 从文件名中提取真实文件名（去掉UUID前缀和.pdf扩展名）
             full_filename = file_path.name
             if '_' in full_filename:
                 # 格式：UUID_真实文件名.pdf
                 real_filename = '_'.join(full_filename.split('_')[1:])
             else:
                 real_filename = full_filename
-            
+
+            # 去掉.pdf扩展名
+            if real_filename.lower().endswith('.pdf'):
+                real_filename = real_filename[:-4]
+
             files.append({
-                'filename': real_filename,  # 返回真实文件名
+                'filename': real_filename,  # 返回去掉.pdf扩展名的真实文件名
                 'full_filename': full_filename,  # 保留完整文件名用于删除等操作
                 'size': stat.st_size,
                 'upload_time': datetime.fromtimestamp(stat.st_ctime).isoformat()
@@ -821,7 +820,7 @@ def export_excel():
                    'Corresponding Author', "Corresponding author's email"],
             'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
                        '通讯作者邮箱', '关键词', '摘要', '致谢'],
-            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓', '第一作者名', '通讯作者姓', '通讯作者名']
+            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名']
         }
 
         # 获取当前模式的字段顺序
@@ -930,7 +929,7 @@ def download_excel():
                    'Corresponding Author', "Corresponding author's email"],
             'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
                        '通讯作者邮箱', '关键词', '摘要', '致谢'],
-            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓', '第一作者名', '通讯作者姓', '通讯作者名']
+            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名']
         }
 
         # 按指定顺序重新组织数据
