@@ -84,45 +84,17 @@ class PaperMeta:
 API_KEY = Config.LLM_API_KEY
 API_ENDPOINT = Config.LLM_API_ENDPOINT
 
-LLM_PROMPT_TEMPLATE = """
-你是一个专业的学术论文信息提取专家。请从以下PDF第一页的文本内容中提取论文的元数据信息。
-
-请严格按照以下JSON格式输出，不要添加任何解释性文字：
-{{
-  "title": "论文标题",
-  "authors": [
-    {{
-      "name": "作者姓名",
-      "order": 作者顺序号（从1开始），
-      "affiliation": "作者单位",
-      "is_first_author": true/false,
-      "is_corresponding_author": true/false,
-      "email": "邮箱地址（如果有）"
-    }}
-  ],
-  "abstract": "摘要内容",
-  "keywords": ["关键词1", "关键词2"],
-  "emails": ["邮箱1"],
-  "confidence": 0.95
-}}
-
-注意：作者顺序必须与视觉阅读顺序一致：行从上到下，行内从左到右。
-
-关于关键词：论文中可能为"Keyword"/"Keywords", 如果不是"Keyword"/"Keywords",则关键词留空,关键词有可能是缩写,请不要忽略,比如“Gp” “LLM”等。
+# 导入提示词配置
+from prompts_config import PromptsConfig
 
 
-以下是PDF第一页的文本内容：
-{text_content}
-"""
-
-
-async def call_llm_api(text_content: str) -> dict:
+async def call_llm_api(text_content: str, mode: str = 'sn') -> dict:
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": Config.LLM_MODEL,
         "max_tokens": Config.LLM_MAX_TOKENS,
         "temperature": Config.LLM_TEMPERATURE,
-        "messages": [{"role": "user", "content": LLM_PROMPT_TEMPLATE.format(text_content=text_content)}],
+        "messages": [{"role": "user", "content": PromptsConfig.get_prompt_for_mode(mode).format(text_content=text_content)}],
     }
     try:
         async with aiohttp.ClientSession() as session:
@@ -157,6 +129,122 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     except Exception as e:
         print("PDF文本提取失败:", e)
         return ""
+
+
+def extract_text_with_span_info(pdf_path: str) -> str:
+    """
+    提取PDF文本，同时保留span结构信息，用于更好地处理角标
+    特别优化AP模式中的角标识别问题
+    """
+    try:
+        doc = fitz.open(pdf_path)
+        if len(doc) == 0:
+            doc.close()
+            return ""
+
+        page = doc[0]
+        blocks = page.get_text("dict")["blocks"]
+
+        text_parts = []
+        for block in blocks:
+            if "lines" not in block:
+                continue
+
+            for line in block["lines"]:
+                line_text = ""
+                spans = line["spans"]
+
+                for i, span in enumerate(spans):
+                    span_text = span["text"].strip()
+                    if not span_text:
+                        continue
+
+                    font_size = span["size"]
+
+                    # 改进的角标识别逻辑
+                    is_superscript = _is_independent_superscript(span, spans, i, font_size)
+
+                    if is_superscript:
+                        # 独立的角标，用特殊标记包围
+                        line_text += f" [SUPERSCRIPT:{span_text}] "
+                    else:
+                        # 正常文本或嵌入在姓名中的角标
+                        line_text += span_text + " "
+
+                if line_text.strip():
+                    text_parts.append(line_text.strip())
+
+        doc.close()
+        return "\n".join(text_parts)
+
+    except Exception as e:
+        print("PDF span信息提取失败:", e)
+        # 回退到简单提取
+        return extract_text_from_pdf(pdf_path)
+
+
+def _is_independent_superscript(span, spans, span_index, font_size):
+    """
+    判断是否为独立的角标
+
+    判断条件：
+    1. 字体较小（相对于周围文本）
+    2. 文本长度较短（通常1-3个字符）
+    3. 包含角标符号（*, †, ‡, §, ¶, #, a*, b*, 等）
+    4. 独立的span（不与姓名在同一span中）
+    """
+    span_text = span["text"].strip()
+
+    # 基本条件检查
+    if not span_text or len(span_text) > 4:
+        return False
+
+    # 检查是否包含角标符号
+    superscript_patterns = ["*", "†", "‡", "§", "¶", "#"]
+    has_superscript_symbol = any(symbol in span_text for symbol in superscript_patterns)
+
+    # 检查是否是字母+星号的组合（如 a*, b*, c*）
+    is_letter_star = len(span_text) <= 3 and span_text.endswith("*") and span_text[:-1].isalpha()
+
+    if not (has_superscript_symbol or is_letter_star):
+        return False
+
+    # 字体大小检查 - 相对于周围文本较小
+    avg_font_size = _get_average_font_size(spans)
+    is_small_font = font_size < avg_font_size * 0.8  # 小于平均字体大小的80%
+
+    # 如果字体明显较小，很可能是角标
+    if is_small_font:
+        return True
+
+    # 即使字体大小相近，如果是独立的短文本且包含角标符号，也可能是角标
+    if len(span_text) <= 2 and has_superscript_symbol:
+        return True
+
+    # 特殊处理：单独的字母+星号组合（如独立的"a*"）
+    if is_letter_star and len(span_text) <= 2:
+        # 检查前后span的内容，如果前面是完整的姓名，后面不是姓名的延续，则很可能是独立角标
+        if span_index > 0:
+            prev_span = spans[span_index - 1]
+            prev_text = prev_span["text"].strip()
+            # 如果前一个span看起来像完整的姓名（包含空格或大写字母开头）
+            if len(prev_text) > 2 and (prev_text[0].isupper() or " " in prev_text):
+                return True
+
+    return False
+
+
+def _get_average_font_size(spans):
+    """计算spans中的平均字体大小"""
+    if not spans:
+        return 12  # 默认字体大小
+
+    font_sizes = []
+    for span in spans:
+        if span["text"].strip():  # 只考虑非空文本的span
+            font_sizes.append(span["size"])
+
+    return sum(font_sizes) / len(font_sizes) if font_sizes else 12
 
 
 def extract_acknowledgment_from_last_pages(pdf_path: str) -> str:
@@ -375,17 +463,27 @@ def fix_author_order_precise(authors: List[Dict[str, Any]], pdf_path: str) -> Li
 # 主流程
 # =========================
 
-async def extract_first_page_llm(pdf_path: str) -> PaperMeta:
-    text_content = extract_text_from_pdf(pdf_path)
+async def extract_first_page_llm(pdf_path: str, mode: str = 'sn') -> PaperMeta:
+    # AP模式使用改进的文本提取，其他模式使用原有方法
+    if mode == 'ap':
+        text_content = extract_text_with_span_info(pdf_path)
+    else:
+        text_content = extract_text_from_pdf(pdf_path)
+
     if not text_content:
         return PaperMeta(title="", abstract=None, keywords=[], authors=[], affiliations=[], emails=[], confidence=0.0)
-    llm_result = await call_llm_api(text_content)
+    llm_result = await call_llm_api(text_content, mode)
     if not llm_result:
         return PaperMeta(title="", abstract=None, keywords=[], authors=[], affiliations=[], emails=[], confidence=0.0)
 
-    # 修正作者顺序
+    # 修正作者顺序 - AP和SN模式跳过复杂的双栏判定逻辑
     author_list = llm_result.get('authors', []) or []
-    corrected_authors = fix_author_order_precise(author_list, pdf_path)
+    if mode in ['ap', 'sn']:
+        # 简化模式：信任LLM的顺序识别，不进行复杂的重排序
+        corrected_authors = author_list
+    else:
+        # 复杂模式：使用双栏判定逻辑
+        corrected_authors = fix_author_order_precise(author_list, pdf_path)
 
     # 单位去重映射
     affiliations: List[Affiliation] = []

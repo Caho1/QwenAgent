@@ -42,7 +42,8 @@ def check_files():
     required_files = [
         'Metadata.py',
         'templates/PDF.html',
-        'pdf_metadata_api.py'
+        'routes.py',
+        'data_processor.py'
     ]
     
     missing_files = []
@@ -107,7 +108,7 @@ def main():
     
     try:
         # 导入并启动Flask应用
-        from pdf_metadata_api import app
+        from routes import app
         app.run(
             host=args.host,
             port=args.port,

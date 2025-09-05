@@ -34,7 +34,7 @@ pip install -r requirements.txt
 python run_server.py
 ```
 
-然后在浏览器中访问 `http://localhost:5000`
+然后在浏览器中访问 `http://localhost:6666`
 
 ## 使用方法
 
