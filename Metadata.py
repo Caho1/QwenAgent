@@ -10,8 +10,8 @@ metadata.py — 基于 PyMuPDF get_text("words") 的作者切分与排序（修�
 5) API Key 改为环境变量 DASHSCOPE_API_KEY。
 
 对外接口保持：
-- extract_first_page(pdf_path) → PaperMeta
-- extract_first_page_llm(pdf_path) → PaperMeta (async)
+- extract_first_page(pdf_path) → tuple[PaperMeta, int]
+- extract_first_page_llm(pdf_path) → tuple[PaperMeta, int] (async)
 - fix_author_order_precise(authors, pdf_path) 内部改用行聚类+行内排序。
 """
 
@@ -88,7 +88,7 @@ API_ENDPOINT = Config.LLM_API_ENDPOINT
 from prompts_config import PromptsConfig
 
 
-async def call_llm_api(text_content: str, mode: str = 'sn') -> dict:
+async def call_llm_api(text_content: str, mode: str = 'sn') -> tuple[dict, int]:
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": Config.LLM_MODEL,
@@ -104,13 +104,17 @@ async def call_llm_api(text_content: str, mode: str = 'sn') -> dict:
                     content = data["choices"][0]["message"]["content"]
                     i, j = content.find("{"), content.rfind("}")
                     if i != -1 and j != -1:
-                        return json.loads(content[i:j+1])
+                        result = json.loads(content[i:j+1])
+                        # 获取tokens使用量
+                        usage = data.get("usage", {})
+                        tokens_used = usage.get("total_tokens", 0)
+                        return result, tokens_used
                     raise ValueError("LLM返回缺少有效JSON")
                 else:
                     raise RuntimeError(f"API {resp.status}: {await resp.text()}")
     except Exception as e:
         print("LLM API调用失败:", e)
-        return None
+        return None, 0
 
 
 # =========================
@@ -463,7 +467,7 @@ def fix_author_order_precise(authors: List[Dict[str, Any]], pdf_path: str) -> Li
 # 主流程
 # =========================
 
-async def extract_first_page_llm(pdf_path: str, mode: str = 'sn') -> PaperMeta:
+async def extract_first_page_llm(pdf_path: str, mode: str = 'sn') -> tuple[PaperMeta, int]:
     # AP模式使用改进的文本提取，其他模式使用原有方法
     if mode == 'ap':
         text_content = extract_text_with_span_info(pdf_path)
@@ -471,10 +475,10 @@ async def extract_first_page_llm(pdf_path: str, mode: str = 'sn') -> PaperMeta:
         text_content = extract_text_from_pdf(pdf_path)
 
     if not text_content:
-        return PaperMeta(title="", abstract=None, keywords=[], authors=[], affiliations=[], emails=[], confidence=0.0)
-    llm_result = await call_llm_api(text_content, mode)
+        return PaperMeta(title="", abstract=None, keywords=[], authors=[], affiliations=[], emails=[], confidence=0.0), 0
+    llm_result, tokens_used = await call_llm_api(text_content, mode)
     if not llm_result:
-        return PaperMeta(title="", abstract=None, keywords=[], authors=[], affiliations=[], emails=[], confidence=0.0)
+        return PaperMeta(title="", abstract=None, keywords=[], authors=[], affiliations=[], emails=[], confidence=0.0), tokens_used or 0
 
     # 修正作者顺序 - AP和SN模式跳过复杂的双栏判定逻辑
     author_list = llm_result.get('authors', []) or []
@@ -519,10 +523,11 @@ async def extract_first_page_llm(pdf_path: str, mode: str = 'sn') -> PaperMeta:
         emails=llm_result.get('emails', []) or [],
         confidence=float(llm_result.get('confidence', 0.0) or 0.0)
     )
-    return meta
+    # 返回元数据和tokens使用量
+    return meta, tokens_used
 
 
-def extract_first_page(pdf_path: str) -> PaperMeta:
+def extract_first_page(pdf_path: str) -> tuple[PaperMeta, int]:
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(extract_first_page_llm(pdf_path))
@@ -532,7 +537,7 @@ def extract_first_page(pdf_path: str) -> PaperMeta:
 
 if __name__ == "__main__":
     path = "IEEE+资助论文收集测试文件/224081610535175325.pdf"
-    meta = extract_first_page(path)
+    meta, tokens_used = extract_first_page(path)
     output = {
         "title": meta.title,
         "abstract": meta.abstract,
@@ -540,6 +545,7 @@ if __name__ == "__main__":
         "authors": [asdict(a) for a in meta.authors],
         "affiliations": [asdict(aff) for aff in meta.affiliations],
         "emails": meta.emails,
-        "confidence": meta.confidence
+        "confidence": meta.confidence,
+        "tokens_used": tokens_used
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))

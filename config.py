@@ -14,12 +14,15 @@ class Config:
     # 文件上传配置
     UPLOAD_FOLDER = 'uploads'
     RESULTS_FOLDER = 'results'
-    MAX_CONTENT_LENGTH = 2 * 1024 * 1024 * 1024  # 2GB
+    MAX_CONTENT_LENGTH = None  # 无文件大小限制
     ALLOWED_EXTENSIONS = {'pdf'}
-    
+
+    # 业务限制
+    MAX_UPLOAD_FILES = 300  # 单次最多上传文件数
+
     # API配置
     API_RATE_LIMIT = "100 per minute"
-    
+
     # LLM配置
     LLM_API_KEY = 'sk-bd884acabfc8420fb852bbdd86fa276a'
     LLM_API_ENDPOINT = os.environ.get('LLM_API_ENDPOINT') or "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"

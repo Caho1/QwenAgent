@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 /uploads
 /results
+/300
 # C extensions
 *.so
 

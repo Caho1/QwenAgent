@@ -48,7 +48,8 @@ class BaseProcessor:
             'processing_time',
             'filename',  # 移除通用filename字段
             'file',      # 移除文件路径字段
-            'status'     # 移除状态字段（仅保留有错误的记录中的error字段）
+            'status',    # 移除状态字段（仅保留有错误的记录中的error字段）
+            'tokens_used'  # 不对外展示tokens统计
         }
 
         cleaned_data = []
@@ -86,15 +87,19 @@ class ComplexProcessor(BaseProcessor):
         """处理单个PDF文件 - 复杂模式（IEEE/FUNDING）"""
         try:
             # 调用现有的元数据提取函数，传递mode参数以使用对应的提示词
-            meta = await extract_first_page_llm(file_path, mode)
+            meta, tokens_used = await extract_first_page_llm(file_path, mode)
             
             # 根据模式转换数据格式
             if mode == 'ieee':
-                return self._format_ieee_data(meta, file_path)
+                result = self._format_ieee_data(meta, file_path)
             elif mode == 'funding':
-                return self._format_funding_data(meta, file_path)
+                result = self._format_funding_data(meta, file_path)
             else:
                 raise ValueError(f"ComplexProcessor不支持的模式: {mode}")
+            
+            # 添加tokens使用信息
+            result['tokens_used'] = tokens_used
+            return result
                 
         except Exception as e:
             filename = self._extract_real_filename(file_path)
@@ -105,7 +110,8 @@ class ComplexProcessor(BaseProcessor):
                 # 根据模式添加对应的文件名字段
                 '文件名': filename,  # 资助信息模式
                 '订单号': filename,  # IEEE模式
-                'status': 'failed'
+                'status': 'failed',
+                'tokens_used': 0
             }
     
     def _format_ieee_data(self, meta: PaperMeta, file_path: str) -> Dict[str, Any]:
@@ -175,15 +181,19 @@ class SimpleProcessor(BaseProcessor):
         """处理单个PDF文件 - 简化模式（SN/AP）"""
         try:
             # 调用现有的元数据提取函数，传递mode参数以使用对应的提示词
-            meta = await extract_first_page_llm(file_path, mode)
+            meta, tokens_used = await extract_first_page_llm(file_path, mode)
             
             # 根据模式转换数据格式
             if mode == 'sn':
-                return self._format_sn_data(meta, file_path)
+                result = self._format_sn_data(meta, file_path)
             elif mode == 'ap':
-                return self._format_ap_data(meta, file_path)
+                result = self._format_ap_data(meta, file_path)
             else:
                 raise ValueError(f"SimpleProcessor不支持的模式: {mode}")
+            
+            # 添加tokens使用信息
+            result['tokens_used'] = tokens_used
+            return result
                 
         except Exception as e:
             filename = self._extract_real_filename(file_path)
@@ -194,7 +204,8 @@ class SimpleProcessor(BaseProcessor):
                 # 根据模式添加对应的文件名字段
                 '文件名': filename,  # AP模式
                 'Number': filename,  # SN模式
-                'status': 'failed'
+                'status': 'failed',
+                'tokens_used': 0
             }
     
     def _format_sn_data(self, meta: PaperMeta, file_path: str) -> Dict[str, Any]:
@@ -264,18 +275,21 @@ class SimpleProcessor(BaseProcessor):
         else:
             result['第一作者姓名'] = ''
 
-        # 通讯作者完整姓名
+        # 通讯作者完整姓名和邮箱
+        # 当第一作者和通讯作者是同一人时，通讯作者姓名字段为空
         if corresponding_author:
-            result['通讯作者姓名'] = corresponding_author.name
+            if first_author and corresponding_author.name == first_author.name:
+                result['通讯作者姓名'] = ''
+            else:
+                result['通讯作者姓名'] = corresponding_author.name
+            result['通讯作者邮箱'] = corresponding_author.email or ''
         else:
             result['通讯作者姓名'] = ''
+            result['通讯作者邮箱'] = ''
 
-        # 全部作者姓名（用逗号分隔）
-        if meta.authors:
-            all_authors = ', '.join([author.name for author in meta.authors])
-            result['全部作者姓名'] = all_authors
-        else:
-            result['全部作者姓名'] = ''
+        # 分别显示每个作者（作者1、作者2等）
+        for i, author in enumerate(meta.authors, 1):
+            result[f'作者{i}'] = author.name
 
         return result
 

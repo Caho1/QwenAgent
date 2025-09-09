@@ -21,56 +21,66 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RateLimitConfig:
     """速率限制配置"""
-    rpm: int = 1200  # 每分钟请求数
-    tpm: int = 5000000  # 每分钟token数
-    max_concurrent: int = 20  # 最大并发数
-    batch_size: int = 10  # 批次大小
-    retry_attempts: int = 3  # 重试次数
+    rps: int = 50        # 每秒请求数上限（RPS≤50）
+    rpm: int = 5000      # 每分钟请求数上限（RPM≤5000）
+    tpm: int = 20000000  # 每分钟token数（保持原高阈值）
+    max_concurrent: int = 50  # 同时在飞请求（并发）不超过50
+    batch_size: int = 300     # 批次大小（业务一次最多300个）
+    retry_attempts: int = 3   # 重试次数
     retry_delay: float = 1.0  # 重试延迟(秒)
 
 class RateLimiter:
     """速率限制器"""
-    
+
     def __init__(self, config: RateLimitConfig):
         self.config = config
-        self.request_times = deque()
+        self.request_times = deque()        # 最近一分钟请求时间
+        self.second_request_times = deque()  # 最近一秒请求时间
         self.token_usage = deque()
         self.lock = threading.Lock()
-        
-        # 计算安全的请求间隔
-        self.min_request_interval = 60.0 / config.rpm  # 秒
+
+        # 计算安全的请求间隔：同时满足RPS与RPM
+        min_interval_by_rpm = 60.0 / config.rpm if config.rpm > 0 else 0.0
+        min_interval_by_rps = 1.0 / config.rps if getattr(config, 'rps', 0) > 0 else 0.0
+        self.min_request_interval = max(min_interval_by_rpm, min_interval_by_rps)
         self.safe_request_interval = self.min_request_interval * 1.2  # 增加20%安全边距
-        
+
     def can_make_request(self, estimated_tokens: int = 1000) -> bool:
-        """检查是否可以发起请求"""
+        """检查是否可以发起请求（同时考虑RPS、RPM、TPM）"""
         with self.lock:
             current_time = time.time()
-            
-            # 清理过期的请求记录（1分钟前的）
+
+            # 清理过期的请求记录（1分钟前 & 1秒前）
             while self.request_times and current_time - self.request_times[0] > 60:
                 self.request_times.popleft()
-            
+            while self.second_request_times and current_time - self.second_request_times[0] > 1:
+                self.second_request_times.popleft()
             while self.token_usage and current_time - self.token_usage[0][0] > 60:
                 self.token_usage.popleft()
-            
+
+            # 检查RPS限制
+            if getattr(self.config, 'rps', 0) > 0 and len(self.second_request_times) >= self.config.rps:
+                return False
+
             # 检查RPM限制
             if len(self.request_times) >= self.config.rpm * 0.9:  # 90%安全边距
                 return False
-            
+
             # 检查TPM限制
             current_tokens = sum(usage[1] for usage in self.token_usage)
             if current_tokens + estimated_tokens > self.config.tpm * 0.9:  # 90%安全边距
                 return False
-            
+
             return True
-    
+
     def record_request(self, tokens_used: int = 1000):
-        """记录请求"""
+        """记录请求（更新1秒与1分钟窗口统计）"""
         with self.lock:
             current_time = time.time()
             self.request_times.append(current_time)
+            self.second_request_times.append(current_time)
             self.token_usage.append((current_time, tokens_used))
-    
+
     async def wait_for_rate_limit(self, estimated_tokens: int = 1000):
         """等待直到可以发起请求"""
         while not self.can_make_request(estimated_tokens):
@@ -89,8 +99,9 @@ class ConcurrentProcessor:
     def __init__(self, config: RateLimitConfig = None):
         self.config = config or RateLimitConfig()
         self.rate_limiter = RateLimiter(self.config)
+        # 使用最大并发信号量进行硬性限流
         self.semaphore = asyncio.Semaphore(self.config.max_concurrent)
-        
+
     async def process_single_file(self, file_path: str, process_func: Callable, mode: str) -> Dict[str, Any]:
         """处理单个文件"""
         async with self.semaphore:
@@ -174,6 +185,9 @@ class ConcurrentProcessor:
         total_files = len(file_paths)
         logger.info(f"开始全并发处理 {total_files} 个文件，模式: {mode}")
 
+        # 记录输入文件列表（用于调试）
+        logger.debug(f"输入文件列表: {[os.path.basename(f) for f in file_paths[:10]]}{'...' if len(file_paths) > 10 else ''}")
+
         # 创建所有任务，全部并发执行，并保存原始索引
         tasks = []
         for i, file_path in enumerate(file_paths):
@@ -183,16 +197,41 @@ class ConcurrentProcessor:
         logger.info(f"启动 {len(tasks)} 个并发任务...")
 
         # 全部并发执行
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"批量处理过程中发生严重错误: {e}")
+            # 创建失败结果
+            results = []
+            for i, file_path in enumerate(file_paths):
+                filename = os.path.basename(file_path)
+                if filename.lower().endswith('.pdf'):
+                    filename = filename[:-4]
+                results.append({
+                    'file': file_path,
+                    'filename': filename,
+                    'error': f"批量处理失败: {str(e)}",
+                    'status': 'failed',
+                    '_original_index': i,
+                    '_upload_order': i + 1
+                })
+            return results
+
+        # 验证结果数量
+        if len(results) != total_files:
+            logger.error(f"❌ 结果数量不匹配！期望: {total_files}, 实际: {len(results)}")
 
         # 处理异常结果
+        exception_count = 0
         for i, result in enumerate(results):
             if isinstance(result, Exception):
+                exception_count += 1
                 filename = os.path.basename(file_paths[i])
                 # 去掉.pdf扩展名
                 if filename.lower().endswith('.pdf'):
                     filename = filename[:-4]
 
+                logger.error(f"文件处理异常: {filename} - {str(result)}")
                 results[i] = {
                     'file': file_paths[i],
                     'filename': filename,
@@ -201,7 +240,10 @@ class ConcurrentProcessor:
                     '_original_index': i,
                     '_upload_order': i + 1
                 }
-        
+
+        if exception_count > 0:
+            logger.warning(f"发现 {exception_count} 个异常结果已转换为失败记录")
+
         # 按照原始索引重新排序，确保返回顺序与上传顺序一致
         results.sort(key=lambda x: x.get('_original_index', 0))
 
@@ -210,6 +252,10 @@ class ConcurrentProcessor:
         failed = len(results) - successful
 
         logger.info(f"全并发处理完成: 成功 {successful}, 失败 {failed}, 总计 {total_files}")
+
+        # 最终验证
+        if len(results) != total_files:
+            logger.error(f"❌ 最终结果验证失败！输入: {total_files}, 输出: {len(results)}")
 
         # 最终进度回调
         if progress_callback:
@@ -221,21 +267,25 @@ class ConcurrentProcessor:
         """获取处理统计信息"""
         with self.rate_limiter.lock:
             current_time = time.time()
-            
-            # 计算最近1分钟的请求数
-            recent_requests = sum(1 for t in self.rate_limiter.request_times 
-                                if current_time - t <= 60)
-            
+
+            # 计算最近1分钟与最近1秒的请求数
+            recent_requests_min = sum(1 for t in self.rate_limiter.request_times
+                                    if current_time - t <= 60)
+            recent_requests_sec = sum(1 for t in self.rate_limiter.second_request_times
+                                    if current_time - t <= 1)
+
             # 计算最近1分钟的token使用量
-            recent_tokens = sum(usage[1] for usage in self.rate_limiter.token_usage 
-                              if current_time - usage[0] <= 60)
-            
+            recent_tokens = sum(usage[1] for usage in self.rate_limiter.token_usage
+                                if current_time - usage[0] <= 60)
+
             return {
-                'recent_requests_per_minute': recent_requests,
+                'recent_requests_per_second': recent_requests_sec,
+                'recent_requests_per_minute': recent_requests_min,
                 'recent_tokens_per_minute': recent_tokens,
+                'rps_limit': getattr(self.config, 'rps', None),
                 'rpm_limit': self.config.rpm,
                 'tpm_limit': self.config.tpm,
-                'rpm_usage_percent': (recent_requests / self.config.rpm) * 100,
+                'rpm_usage_percent': (recent_requests_min / self.config.rpm) * 100,
                 'tpm_usage_percent': (recent_tokens / self.config.tpm) * 100,
                 'max_concurrent': self.config.max_concurrent,
                 'current_concurrent': self.config.max_concurrent - self.semaphore._value
@@ -248,12 +298,13 @@ def get_global_processor() -> ConcurrentProcessor:
     """获取全局处理器实例"""
     global _global_processor
     if _global_processor is None:
-        # 针对qwen-flash模型优化的配置 - 全并发模式
+        # 受控限流配置：RPS≤50，RPM≤5000，并发≤50；一次最多300个文件
         config = RateLimitConfig(
-            rpm=1200,  # 提高RPM限制
-            tpm=5000000,  # 提高TPM限制
-            max_concurrent=100,  # 合理的并发数，避免资源耗尽
-            batch_size=50,  # 合理的批次大小
+            rps=50,
+            rpm=5000,
+            tpm=20000000,
+            max_concurrent=50,
+            batch_size=300,
             retry_attempts=3,
             retry_delay=1.0
         )

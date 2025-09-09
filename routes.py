@@ -23,7 +23,7 @@ import pandas as pd
 from data_processor import MetadataProcessor
 from concurrent_processor import get_global_processor, ConcurrentProcessor, RateLimitConfig
 from config import Config
-from log_manager import log_manager, log_operation, log_file_upload, log_file_processing, log_batch_processing, log_api_call
+from log_manager import log_manager, log_operation, log_file_upload, log_file_processing, log_batch_processing, log_api_call, start_upload_session, end_upload_session, update_session_mode
 
 # =========================
 # Flask应用初始化
@@ -81,6 +81,36 @@ def get_sn_column_order(data):
 
     return base_columns + dynamic_columns
 
+
+def get_ap_column_order(data):
+    """动态生成AP模式的列顺序"""
+    if not data:
+        return []
+
+    # 基础字段（固定顺序）
+    base_columns = [
+        '文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '通讯作者邮箱'
+    ]
+
+    # 找出最大作者数量
+    max_authors = 0
+    for item in data:
+        if isinstance(item, dict):
+            # 统计作者N字段的数量
+            author_count = 0
+            for key in item.keys():
+                if key.startswith('作者') and key.replace('作者', '').isdigit():
+                    author_num = int(key.replace('作者', ''))
+                    author_count = max(author_count, author_num)
+            max_authors = max(max_authors, author_count)
+
+    # 动态生成作者字段
+    dynamic_columns = []
+    for i in range(1, max_authors + 1):
+        dynamic_columns.append(f'作者{i}')
+
+    return base_columns + dynamic_columns
+
 # =========================
 # API路由定义
 # =========================
@@ -117,15 +147,31 @@ def upload_files():
         uploaded_files = []
         errors = []
 
-        for file in files:
+        # 记录上传开始
+        total_input_files = len([f for f in files if f and f.filename])
+        logger.info(f"开始处理 {total_input_files} 个上传文件")
+
+        # 数量限制（前端已限制，后端再次兜底）
+        if total_input_files > Config.MAX_UPLOAD_FILES:
+            msg = f"超出上传数量限制：最多只能上传 {Config.MAX_UPLOAD_FILES} 个文件"
+            logger.warning(msg)
+            return jsonify({'success': False, 'error': msg, 'limit': Config.MAX_UPLOAD_FILES}), 400
+
+        # 开始上传会话
+        session_key = start_upload_session(total_input_files, "文件上传")
+
+        for i, file in enumerate(files):
             if not file:
+                logger.warning(f"文件 {i+1}: 空文件对象")
                 continue
 
             if not file.filename:
+                logger.warning(f"文件 {i+1}: 文件名为空")
                 errors.append({'filename': '未知', 'error': '文件名为空'})
                 continue
 
             if not allowed_file(file.filename):
+                logger.warning(f"文件 {i+1}: 不支持的文件格式 - {file.filename}")
                 errors.append({'filename': file.filename, 'error': '不支持的文件格式，仅支持PDF文件'})
                 continue
 
@@ -133,21 +179,26 @@ def upload_files():
                 filename = secure_filename(file.filename)
                 file_id = str(uuid.uuid4())
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+
+                logger.debug(f"保存文件: {filename} -> {file_path}")
                 file.save(file_path)
 
                 # 验证文件是否成功保存
                 if not os.path.exists(file_path):
+                    logger.error(f"文件保存失败: {filename} - 文件不存在")
                     errors.append({'filename': filename, 'error': '文件保存失败'})
                     continue
 
                 file_size = os.path.getsize(file_path)
                 if file_size == 0:
+                    logger.error(f"文件为空: {filename}")
                     errors.append({'filename': filename, 'error': '文件为空'})
                     os.remove(file_path)  # 删除空文件
                     continue
 
                 # 记录文件上传日志
                 log_file_upload(filename, file_size)
+                logger.debug(f"文件上传成功: {filename} ({file_size} bytes)")
 
                 uploaded_files.append({
                     'file_id': file_id,
@@ -157,21 +208,29 @@ def upload_files():
                 })
 
             except Exception as e:
+                logger.error(f"文件处理异常: {file.filename} - {str(e)}")
                 errors.append({'filename': file.filename, 'error': f'文件处理失败: {str(e)}'})
 
         processing_time = time.time() - start_time
-        
+
+        # 验证上传结果的完整性
+        successful_uploads = len(uploaded_files)
+        failed_uploads = len(errors)
+        logger.info(f"文件上传完成: 成功 {successful_uploads}, 失败 {failed_uploads}, 总计 {total_input_files}")
+
+        if successful_uploads + failed_uploads != total_input_files:
+            logger.error(f"❌ 文件上传计数不匹配！输入: {total_input_files}, 成功: {successful_uploads}, 失败: {failed_uploads}")
+
+        # 结束上传会话（不再返回日志文件名）
+        end_upload_session(successful_uploads, failed_uploads)
+
         if not uploaded_files and errors:
-            log_operation("文件上传", {"error": "所有文件上传失败", "errors": errors}, processing_time, "error")
             return jsonify({
                 'success': False,
                 'error': '所有文件上传失败',
                 'errors': errors
             }), 400
 
-        # 记录批量上传成功日志
-        log_batch_processing(len(uploaded_files), "文件上传", processing_time, len(uploaded_files), len(errors))
-        
         return jsonify({
             'success': True,
             'files': uploaded_files,
@@ -250,10 +309,14 @@ def extract_metadata(mode):
 
         data = request.get_json()
         file_paths = data.get('file_paths', [])
-        use_concurrent = data.get('use_concurrent', len(file_paths) > 5)  # 超过5个文件自动启用并发
+        # 始终使用并发处理，无论文件数量多少
 
         if not file_paths:
             return jsonify({'error': '没有指定文件路径'}), 400
+
+        # 数量限制（后端兜底）
+        if len(file_paths) > Config.MAX_UPLOAD_FILES:
+            return jsonify({'success': False, 'error': f'超出上传数量限制：最多处理 {Config.MAX_UPLOAD_FILES} 个文件', 'limit': Config.MAX_UPLOAD_FILES}), 400
 
         # 检查文件是否存在
         valid_files = []
@@ -275,54 +338,58 @@ def extract_metadata(mode):
                 'results': invalid_files
             }), 400
 
-        # 选择处理方式
-        if use_concurrent and len(valid_files) > 1:
-            # 并发处理
-            concurrent_processor = get_global_processor()
+        # 记录处理前的文件数量
+        input_file_count = len(valid_files)
+        logger.info(f"开始处理 {input_file_count} 个有效文件，模式: {mode}")
 
-            async def process_wrapper(file_path: str, mode: str):
-                return await processor.process_file(file_path, mode)
+        # 更新现有会话的处理模式，而不是创建新会话
+        mode_names = {
+            'sn': 'SN期刊信息提取',
+            'ap': 'AP信息表收集',
+            'ieee': 'IEEE格式处理',
+            'funding': '基金信息提取'
+        }
+        session_key = update_session_mode(mode_names.get(mode, f'{mode}模式处理'))
 
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                results = loop.run_until_complete(
-                    concurrent_processor.process_batch(valid_files, process_wrapper, mode)
-                )
-                # 并发处理器内部已经按原始索引排序，无需额外排序
-            finally:
-                loop.close()
+        # 统一使用并发处理（无论文件数量多少）
+        concurrent_processor = get_global_processor()
+
+        async def process_wrapper(file_path: str, mode: str):
+            return await processor.process_file(file_path, mode)
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            results = loop.run_until_complete(
+                concurrent_processor.process_batch(valid_files, process_wrapper, mode)
+            )
+            # 并发处理器内部已经按原始索引排序，无需额外排序
+        finally:
+            loop.close()
+
+        # 验证处理结果的完整性
+        output_result_count = len(results)
+        logger.info(f"处理完成，输入文件数: {input_file_count}, 输出结果数: {output_result_count}")
+
+        if input_file_count != output_result_count:
+            logger.error(f"❌ 文件处理不完整！丢失了 {input_file_count - output_result_count} 个文件")
+
+            # 找出丢失的文件
+            input_files = set(valid_files)
+            output_files = set(r.get('file', '') for r in results if isinstance(r, dict))
+            missing_files = input_files - output_files
+
+            if missing_files:
+                logger.error(f"丢失的文件: {list(missing_files)}")
         else:
-            # 串行处理
-            results = []
-            for file_path in valid_files:
-                try:
-                    # 在Flask线程中创建新的事件循环
-                    import concurrent.futures
+            logger.info("✓ 所有文件都已正确处理")
 
-                    def run_async_in_thread():
-                        """在新线程中运行异步函数"""
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            return loop.run_until_complete(processor.process_file(file_path, mode))
-                        finally:
-                            loop.close()
-                    
-                    # 使用线程池执行异步函数
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(run_async_in_thread)
-                        result = future.result(timeout=300)  # 5分钟超时
-                    
-                    results.append(result)
-                except Exception as e:
-                    logger.error(f"串行处理文件失败: {file_path} - {str(e)}")
-                    results.append({
-                        'file': file_path,
-                        'filename': processor._extract_real_filename(file_path),
-                        'error': str(e),
-                        'status': 'failed'
-                    })
+        # 统计处理结果
+        successful_results = [r for r in results if r.get('status') != 'failed' and 'error' not in r]
+        failed_results = [r for r in results if r.get('status') == 'failed' or 'error' in r]
+
+        # 结束处理会话（不再返回日志文件名）
+        end_upload_session(len(successful_results), len(failed_results))
 
         # 合并无效文件结果，并按照原始文件路径顺序排序
         all_results = results + invalid_files
@@ -342,11 +409,11 @@ def extract_metadata(mode):
         return jsonify({
             'success': True,
             'mode': mode,
-            'results': all_results,
+            'results': [{k: v for k, v in r.items() if k != 'tokens_used'} for r in all_results],
             'count': len(all_results),
             'successful': successful_count,
             'failed': len(all_results) - successful_count,
-            'concurrent_used': use_concurrent and len(valid_files) > 1
+            'concurrent_used': True  # 始终使用并发处理
         })
 
     except Exception as e:
@@ -366,8 +433,11 @@ def extract_batch_optimized():
         if not file_paths:
             return jsonify({'error': '没有指定文件路径'}), 400
 
-        if len(file_paths) > 200:
-            return jsonify({'error': '单次最多处理200个文件'}), 400
+        # 数量限制（后端兜底）
+        if len(file_paths) > Config.MAX_UPLOAD_FILES:
+            return jsonify({'success': False, 'error': f'超出上传数量限制：最多处理 {Config.MAX_UPLOAD_FILES} 个文件', 'limit': Config.MAX_UPLOAD_FILES}), 400
+
+        # 原先移除限制，这里恢复为受控并发
 
         # 检查文件是否存在
         valid_files = [f for f in file_paths if os.path.exists(f)]
@@ -411,7 +481,7 @@ def extract_batch_optimized():
         return jsonify({
             'success': True,
             'mode': mode,
-            'results': results,
+            'results': [{k: v for k, v in r.items() if k != 'tokens_used'} for r in results],
             'statistics': {
                 'total_files': len(file_paths),
                 'valid_files': len(valid_files),
@@ -483,7 +553,7 @@ def batch_extract():
 
         return jsonify({
             'success': True,
-            'results': results,
+            'results': {m: [{k: v for k, v in r.items() if k != 'tokens_used'} for r in res] for m, res in results.items()},
             'processed_modes': list(results.keys())
         })
 
@@ -552,12 +622,17 @@ def process_files():
 
                     if 'error' not in result:
                         success_count += 1
+                        # 获取tokens使用量（仅用于日志，不对外返回）
+                        tokens_used = result.get('tokens_used', 0)
                         # 记录成功处理日志
-                        log_file_processing(real_filename, mode, file_processing_time, "success")
+                        log_file_processing(real_filename, mode, file_processing_time, "success", None, tokens_used)
+
+                        # 去除对外不展示的内部字段
+                        public_result = {k: v for k, v in result.items() if k != 'tokens_used'}
 
                         yield json.dumps({
                             'type': 'data_row',
-                            'data': result
+                            'data': public_result
                         }) + '\n'
 
                         yield json.dumps({
@@ -617,14 +692,16 @@ def export_excel():
         column_orders = {
             'ieee': ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'],
             'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
-                       '通讯作者邮箱', '关键词', '摘要', '致谢'],
-            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '全部作者姓名']
+                       '通讯作者邮箱', '关键词', '摘要', '致谢']
         }
 
         # 获取当前模式的字段顺序
         if mode == 'sn':
             # SN模式使用动态列顺序
             column_order = get_sn_column_order(cleaned_results)
+        elif mode == 'ap':
+            # AP模式使用动态列顺序
+            column_order = get_ap_column_order(cleaned_results)
         elif mode in column_orders:
             column_order = column_orders[mode]
         else:
@@ -731,14 +808,16 @@ def download_excel():
         column_orders = {
             'ieee': ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'],
             'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
-                       '通讯作者邮箱', '关键词', '摘要', '致谢'],
-            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '全部作者姓名']
+                       '通讯作者邮箱', '关键词', '摘要', '致谢']
         }
 
         # 按指定顺序重新组织数据
         if mode == 'sn':
             # SN模式使用动态列顺序
             column_order = get_sn_column_order(cleaned_results)
+        elif mode == 'ap':
+            # AP模式使用动态列顺序
+            column_order = get_ap_column_order(cleaned_results)
         elif mode in column_orders:
             column_order = column_orders[mode]
         else:
@@ -856,4 +935,4 @@ if __name__ == '__main__':
     print("\n📝 日志系统已启用，日志文件保存在 log/ 目录")
     print("✨ 系统就绪，等待请求...")
 
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)

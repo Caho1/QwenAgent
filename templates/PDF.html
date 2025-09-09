@@ -6,7 +6,7 @@
     <title>AI 论文元数据提取器 - 控制面板</title>
     <!-- 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
+
     <style>
         /* ========== 全局与卡片风格 ========== */
         body {
@@ -318,7 +318,7 @@
         logContainer.appendChild(p);
         logContainer.scrollTop = logContainer.scrollHeight;
     }
-    
+
     // --- 定义列排序函数 (支持两种模式) ---
     function getSortedHeaders(data, mode = 'sn') {
         const headerSet = new Set();
@@ -340,10 +340,14 @@
                 const index = ieeeOrder.indexOf(header);
                 if (index !== -1) return index;
             } else if (mode === 'ap') {
-                // AP模式的列顺序：文件名、题目、关键词、摘要、第一作者姓名、通讯作者姓名、全部作者姓名
-                const apOrder = ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '全部作者姓名'];
-                const index = apOrder.indexOf(header);
+                // AP模式的列顺序：基础字段 + 动态作者字段
+                const baseOrder = ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '通讯作者邮箱'];
+                const index = baseOrder.indexOf(header);
                 if (index !== -1) return index;
+
+                // 处理动态作者字段
+                const authorMatch = header.match(/^作者(\d+)$/);
+                if (authorMatch) return 100 + parseInt(authorMatch[1], 10);
             } else {
                 // SN模式的列顺序
                 const snOrder = ['Number', 'Title', 'SubTitle', 'Corresponding Author', "Corresponding author's email"];
@@ -420,6 +424,38 @@
         return baseColumns.concat(dynamicColumns);
     }
 
+    // --- 动态生成AP模式的列顺序 ---
+    function getAPColumnOrder(data) {
+        if (!data || data.length === 0) return [];
+
+        // 基础字段（固定顺序）
+        const baseColumns = [
+            '文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '通讯作者邮箱'
+        ];
+
+        // 找出最大作者数量
+        let maxAuthors = 0;
+        data.forEach(item => {
+            if (typeof item === 'object' && item !== null) {
+                // 统计作者N字段的数量
+                Object.keys(item).forEach(key => {
+                    if (key.startsWith('作者') && /^作者\d+$/.test(key)) {
+                        const authorNum = parseInt(key.replace('作者', ''));
+                        maxAuthors = Math.max(maxAuthors, authorNum);
+                    }
+                });
+            }
+        });
+
+        // 动态生成作者字段
+        const dynamicColumns = [];
+        for (let i = 1; i <= maxAuthors; i++) {
+            dynamicColumns.push(`作者${i}`);
+        }
+
+        return baseColumns.concat(dynamicColumns);
+    }
+
     // --- 获取保持原始顺序的表头（仅用于显示） ---
     function getOriginalOrderHeaders(data, mode = 'sn') {
         if (!data || data.length === 0) return [];
@@ -432,8 +468,7 @@
         const columnOrders = {
             'ieee': ['订单号', '英文题目', '英文副标', '作者姓名', '第一作者邮箱'],
             'funding': ['文件名', '论文英文题目', '第一作者姓名', '第一作者单位', '通讯作者姓名', '通讯作者单位',
-                       '通讯作者邮箱', '关键词', '摘要', '致谢'],
-            'ap': ['文件名', '题目', '关键词', '摘要', '第一作者姓名', '通讯作者姓名', '全部作者姓名']
+                       '通讯作者邮箱', '关键词', '摘要', '致谢']
         };
 
         // 收集所有实际存在的字段
@@ -444,9 +479,11 @@
             }
         });
 
-        // SN模式使用动态列顺序
+        // SN模式和AP模式使用动态列顺序
         if (mode === 'sn') {
             return getSNColumnOrder(cleanedData);
+        } else if (mode === 'ap') {
+            return getAPColumnOrder(cleanedData);
         }
 
         // 如果有预定义的字段顺序，使用它
@@ -586,6 +623,16 @@
             alert('请选择要处理的 PDF 文件！');
             return;
         }
+        //  
+        const MAX_FILES = 300;
+        if (files.length > MAX_FILES) {
+            const msg = `:  ${MAX_FILES} PDF`;
+            alert(msg);
+            logMessage(msg, 'error');
+            statusDiv.textContent = msg;
+            return;
+        }
+
 
         // 重置状态
         startButton.disabled = true;
@@ -605,78 +652,46 @@
         statusDiv.textContent = `正在处理 ${files.length} 个文件...`;
 
         try {
-            // 分批上传用户选择的文件
-            logMessage('正在上传文件...');
+            // 一次性上传所有文件（最多300个）
+            logMessage(`正在上传 ${files.length} 个文件...`);
 
-            const batchSize = 20; // 每批上传20个文件，避免单次请求过大
-            const totalBatches = Math.ceil(files.length / batchSize);
-            let allFilePaths = [];
-            let totalUploaded = 0;
-            let uploadErrors = [];
-
-            for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-                const startIndex = batchIndex * batchSize;
-                const endIndex = Math.min(startIndex + batchSize, files.length);
-                const batchFiles = Array.from(files).slice(startIndex, endIndex);
-
-                logMessage(`正在上传第 ${batchIndex + 1}/${totalBatches} 批文件 (${batchFiles.length} 个文件)...`);
-
-                const formData = new FormData();
-                for (let i = 0; i < batchFiles.length; i++) {
-                    formData.append('files', batchFiles[i]);
-                }
-
-                try {
-                    // 上传当前批次文件到服务器
-                    const uploadResponse = await fetch(`${BACKEND_URL}/api/upload`, {
-                        method: 'POST',
-                        body: formData
-                    });
-
-                    if (!uploadResponse.ok) {
-                        const errorText = await uploadResponse.text();
-                        throw new Error(`第 ${batchIndex + 1} 批文件上传失败: ${uploadResponse.status} - ${errorText}`);
-                    }
-
-                    const uploadResult = await uploadResponse.json();
-
-                    // 检查上传结果
-                    if (uploadResult.success) {
-                        const batchFilePaths = uploadResult.files.map(file => file.path);
-                        allFilePaths = allFilePaths.concat(batchFilePaths);
-                        totalUploaded += uploadResult.files.length;
-
-                        // 记录错误信息（如果有的话）
-                        if (uploadResult.errors && uploadResult.errors.length > 0) {
-                            uploadErrors = uploadErrors.concat(uploadResult.errors);
-                        }
-
-                        logMessage(`第 ${batchIndex + 1} 批上传完成: ${uploadResult.files.length} 个文件成功，${uploadResult.errors ? uploadResult.errors.length : 0} 个文件失败`);
-                    } else {
-                        throw new Error(uploadResult.error || '上传失败');
-                    }
-
-                } catch (error) {
-                    logMessage(`第 ${batchIndex + 1} 批上传失败: ${error.message}`, 'error');
-                    uploadErrors.push({
-                        batch: batchIndex + 1,
-                        error: error.message
-                    });
-                }
+            const formData = new FormData();
+            for (let i = 0; i < files.length; i++) {
+                formData.append('files', files[i]);
             }
 
+            // 一次性上传所有文件到服务器
+            const uploadResponse = await fetch(`${BACKEND_URL}/api/upload`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!uploadResponse.ok) {
+                const errorText = await uploadResponse.text();
+                throw new Error(`文件上传失败: ${uploadResponse.status} - ${errorText}`);
+            }
+
+            const uploadResult = await uploadResponse.json();
+
             // 检查上传结果
+            if (!uploadResult.success) {
+                throw new Error(uploadResult.error || '上传失败');
+            }
+
+            const allFilePaths = uploadResult.files.map(file => file.path);
+            const uploadErrors = uploadResult.errors || [];
+
             if (allFilePaths.length === 0) {
-                throw new Error('所有文件上传都失败了，请检查文件格式和网络连接');
+                throw new Error('没有文件成功上传，请检查文件格式和网络连接');
             }
 
             if (uploadErrors.length > 0) {
-                logMessage(`上传完成: ${totalUploaded} 个文件成功，${uploadErrors.length} 个批次失败`, 'warning');
+                logMessage(`文件上传完成: ${allFilePaths.length} 个文件成功，${uploadErrors.length} 个文件失败`, 'warning');
                 for (const error of uploadErrors) {
-                    logMessage(`批次 ${error.batch} 错误: ${error.error}`, 'error');
+                    logMessage(`文件上传错误: ${error}`, 'error');
                 }
             } else {
-                logMessage(`所有文件上传完成！总计 ${totalUploaded} 个文件`);
+                logMessage(`文件上传完成！成功上传 ${allFilePaths.length} 个文件`);
             }
 
             // 获取所有上传文件的路径
@@ -685,7 +700,7 @@
 
             // 调用提取API
             logMessage(`正在调用 ${selectedMode} 模式的提取API...`);
-            logMessage(`将处理 ${filePaths.length} 个文件，使用 ${filePaths.length > 5 ? '并发' : '串行'} 处理模式`);
+            logMessage(`将处理 ${filePaths.length} 个文件，已启用限流（最多300个）`);
 
             const response = await fetch(`${BACKEND_URL}/api/extract/${selectedMode}`, {
                 method: 'POST',
@@ -694,7 +709,7 @@
                 },
                 body: JSON.stringify({
                     file_paths: filePaths,
-                    use_concurrent: filePaths.length > 5  // 超过5个文件启用并发处理
+                    use_concurrent: true  // 始终启用并发处理，支持最多300个文件
                 })
             });
 
@@ -770,7 +785,7 @@
             startButton.disabled = false;
         }
     }
-    
+
     // --- 创建下载按钮（未改动功能） ---
     function createAndDisplayDownloadButton(mode = 'sn') {
         if(processedDataForExcel.length === 0){
@@ -843,7 +858,7 @@
                 logMessage(`下载失败: ${error.message}`, 'error');
             }
         };
-        
+
         downloadLinkContainer.innerHTML = ''; // 清空旧按钮
         downloadLinkContainer.appendChild(button);
     }
