@@ -137,8 +137,8 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
 def extract_text_with_span_info(pdf_path: str) -> str:
     """
-    提取PDF文本，同时保留span结构信息，用于更好地处理角标
-    特别优化AP模式中的角标识别问题
+    提取PDF文本，同时保留span结构信息，用于更好地处理角标。
+    AP模式下改为提取PDF的第1和第2页（如果存在第二页），合并后返回。
     """
     try:
         doc = fitz.open(pdf_path)
@@ -146,45 +146,64 @@ def extract_text_with_span_info(pdf_path: str) -> str:
             doc.close()
             return ""
 
-        page = doc[0]
-        blocks = page.get_text("dict")["blocks"]
-
+        pages_to_read = min(2, len(doc))  # 读取前两页
         text_parts = []
-        for block in blocks:
-            if "lines" not in block:
-                continue
 
-            for line in block["lines"]:
-                line_text = ""
-                spans = line["spans"]
+        for page_index in range(pages_to_read):
+            page = doc[page_index]
+            blocks = page.get_text("dict").get("blocks", [])
 
-                for i, span in enumerate(spans):
-                    span_text = span["text"].strip()
-                    if not span_text:
-                        continue
+            for block in blocks:
+                if "lines" not in block:
+                    continue
 
-                    font_size = span["size"]
+                for line in block["lines"]:
+                    line_text = ""
+                    spans = line.get("spans", [])
 
-                    # 改进的角标识别逻辑
-                    is_superscript = _is_independent_superscript(span, spans, i, font_size)
+                    for i, span in enumerate(spans):
+                        span_text = (span.get("text") or "").strip()
+                        if not span_text:
+                            continue
 
-                    if is_superscript:
-                        # 独立的角标，用特殊标记包围
-                        line_text += f" [SUPERSCRIPT:{span_text}] "
-                    else:
-                        # 正常文本或嵌入在姓名中的角标
-                        line_text += span_text + " "
+                        font_size = span.get("size", 0)
 
-                if line_text.strip():
-                    text_parts.append(line_text.strip())
+                        # 改进的角标识别逻辑
+                        is_superscript = _is_independent_superscript(span, spans, i, font_size)
+
+                        if is_superscript:
+                            # 独立的角标，用特殊标记包围
+                            line_text += f" [SUPERSCRIPT:{span_text}] "
+                        else:
+                            # 正常文本或嵌入在姓名中的角标
+                            line_text += span_text + " "
+
+                    if line_text.strip():
+                        text_parts.append(line_text.strip())
+
+            # 页与页之间加入空行分隔，便于LLM解析
+            if page_index < pages_to_read - 1:
+                text_parts.append("")
 
         doc.close()
         return "\n".join(text_parts)
 
     except Exception as e:
         print("PDF span信息提取失败:", e)
-        # 回退到简单提取
-        return extract_text_from_pdf(pdf_path)
+        # 回退：简单提取前两页文本
+        try:
+            fallback_doc = fitz.open(pdf_path)
+            if len(fallback_doc) == 0:
+                fallback_doc.close()
+                return ""
+            pages_to_read = min(2, len(fallback_doc))
+            txt = []
+            for i in range(pages_to_read):
+                txt.append(fallback_doc[i].get_text("text"))
+            fallback_doc.close()
+            return "\n\n".join(t.strip() for t in txt if t and t.strip())
+        except Exception as _:
+            return ""
 
 
 def _is_independent_superscript(span, spans, span_index, font_size):
